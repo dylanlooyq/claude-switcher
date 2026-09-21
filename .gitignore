@@ -1,0 +1,8 @@
+# Profiles, tokens and logs normally live in %APPDATA%\claude-switcher, outside this folder.
+# These patterns are a safety net so they can never be committed by accident.
+profiles*.json
+usage-cache.json
+error.log
+backups/
+settings*.json
+*.backup.json
