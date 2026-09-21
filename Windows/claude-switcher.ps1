@@ -952,19 +952,21 @@ function Show-TestWindow {
     $txtFull.Multiline = $true; $txtFull.ReadOnly = $true; $txtFull.WordWrap = $true; $txtFull.ScrollBars = 'Vertical'
     $txtFull.BackColor = [System.Drawing.SystemColors]::Window
     $txtFull.Font = New-Object System.Drawing.Font('Consolas', 9.5)
-    $txtFull.Location = '12,238'; $txtFull.Size = '796,126'; $txtFull.Anchor = 'Top,Bottom,Left,Right'
+    $txtFull.Location = '12,238'; $txtFull.Size = '796,110'; $txtFull.Anchor = 'Top,Bottom,Left,Right'
     $f.Controls.Add($txtFull)
 
     $hint = New-Object System.Windows.Forms.Label
     $hint.Text = 'Gateway sources get a 1-token test message. Personal checks reachability and that a login exists.'
-    $hint.Location = '12,382'; $hint.AutoSize = $true; $hint.Anchor = 'Bottom,Left'; $hint.ForeColor = [System.Drawing.Color]::DimGray
+    $hint.Location = '12,356'; $hint.Size = '796,18'; $hint.AutoSize = $false; $hint.AutoEllipsis = $true
+    $hint.Anchor = 'Bottom,Left,Right'; $hint.ForeColor = [System.Drawing.Color]::DimGray
     $f.Controls.Add($hint)
 
-    $btnRun = New-Object System.Windows.Forms.Button; $btnRun.Text = 'Test all'; $btnRun.Size = '85,28'; $btnRun.Location = '632,378'; $btnRun.Anchor = 'Bottom,Right'
-    $btnClose = New-Object System.Windows.Forms.Button; $btnClose.Text = 'Close'; $btnClose.Size = '85,28'; $btnClose.Location = '723,378'; $btnClose.Anchor = 'Bottom,Right'
+    $btnRun = New-Object System.Windows.Forms.Button; $btnRun.Text = 'Test all'; $btnRun.Size = '85,28'; $btnRun.Location = '632,382'; $btnRun.Anchor = 'Bottom,Right'
+    $btnClose = New-Object System.Windows.Forms.Button; $btnClose.Text = 'Close'; $btnClose.Size = '85,28'; $btnClose.Location = '723,382'; $btnClose.Anchor = 'Bottom,Right'
     $btnClose.DialogResult = 'Cancel'
-    $btnFix = New-Object System.Windows.Forms.Button; $btnFix.Text = 'Troubleshoot...'; $btnFix.Size = '115,28'; $btnFix.Location = '509,378'; $btnFix.Anchor = 'Bottom,Right'
-    $btnUse = New-Object System.Windows.Forms.Button; $btnUse.Text = 'Check usage...'; $btnUse.Size = '115,28'; $btnUse.Location = '384,378'; $btnUse.Anchor = 'Bottom,Right'
+    $btnClose.Add_Click({ $f.Close() }.GetNewClosure())
+    $btnFix = New-Object System.Windows.Forms.Button; $btnFix.Text = 'Troubleshoot...'; $btnFix.Size = '115,28'; $btnFix.Location = '509,382'; $btnFix.Anchor = 'Bottom,Right'
+    $btnUse = New-Object System.Windows.Forms.Button; $btnUse.Text = 'Check usage...'; $btnUse.Size = '115,28'; $btnUse.Location = '384,382'; $btnUse.Anchor = 'Bottom,Right'
     $btnUse.Add_Click({ Show-UsageWindow })
     $f.Controls.Add($btnUse); $f.Controls.Add($btnFix); $f.Controls.Add($btnRun); $f.Controls.Add($btnClose); $f.CancelButton = $btnClose
 
@@ -1464,17 +1466,19 @@ function Show-UsageWindow {
     $txt = New-Object System.Windows.Forms.TextBox
     $txt.Multiline = $true; $txt.ReadOnly = $true; $txt.WordWrap = $true; $txt.ScrollBars = 'Vertical'
     $txt.BackColor = [System.Drawing.SystemColors]::Window; $txt.Font = New-Object System.Drawing.Font('Consolas', 9.5)
-    $txt.Location = '12,178'; $txt.Size = '796,170'; $txt.Anchor = 'Top,Bottom,Left,Right'
+    $txt.Location = '12,178'; $txt.Size = '796,154'; $txt.Anchor = 'Top,Bottom,Left,Right'
     $f.Controls.Add($txt)
 
     $hint = New-Object System.Windows.Forms.Label
     $hint.Text = 'Personal reads your plan limits from Anthropic (login token stays in memory). Gateways report the key''s spend and budgets.'
-    $hint.Location = '12,362'; $hint.AutoSize = $true; $hint.Anchor = 'Bottom,Left'; $hint.ForeColor = [System.Drawing.Color]::DimGray
+    $hint.Location = '12,340'; $hint.Size = '796,18'; $hint.AutoSize = $false; $hint.AutoEllipsis = $true
+    $hint.Anchor = 'Bottom,Left,Right'; $hint.ForeColor = [System.Drawing.Color]::DimGray
     $f.Controls.Add($hint)
 
-    $btnRefresh = New-Object System.Windows.Forms.Button; $btnRefresh.Text = 'Refresh'; $btnRefresh.Size = '85,28'; $btnRefresh.Location = '632,358'; $btnRefresh.Anchor = 'Bottom,Right'
-    $btnClose = New-Object System.Windows.Forms.Button; $btnClose.Text = 'Close'; $btnClose.Size = '85,28'; $btnClose.Location = '723,358'; $btnClose.Anchor = 'Bottom,Right'
+    $btnRefresh = New-Object System.Windows.Forms.Button; $btnRefresh.Text = 'Refresh'; $btnRefresh.Size = '85,28'; $btnRefresh.Location = '632,362'; $btnRefresh.Anchor = 'Bottom,Right'
+    $btnClose = New-Object System.Windows.Forms.Button; $btnClose.Text = 'Close'; $btnClose.Size = '85,28'; $btnClose.Location = '723,362'; $btnClose.Anchor = 'Bottom,Right'
     $btnClose.DialogResult = 'Cancel'
+    $btnClose.Add_Click({ $f.Close() }.GetNewClosure())
     $f.Controls.Add($btnRefresh); $f.Controls.Add($btnClose); $f.CancelButton = $btnClose
 
     $script:usageForm = $f; $script:usageList = $lv; $script:usageText = $txt; $script:usageBtn = $btnRefresh
