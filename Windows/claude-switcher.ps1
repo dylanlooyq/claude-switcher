@@ -842,15 +842,18 @@ function Show-Editor([string]$SelectId = '') {
     $list.Location = '12,12'; $list.Size = '170,340'; $list.Anchor = 'Top,Bottom,Left'
     $f.Controls.Add($list)
 
-    $lblName = New-Object System.Windows.Forms.Label; $lblName.Text = 'Name'; $lblName.Location = '196,14'; $lblName.AutoSize = $true
-    $txtName = New-Object System.Windows.Forms.TextBox; $txtName.Location = '196,32'; $txtName.Size = '430,23'; $txtName.Anchor = 'Top,Left,Right'
-    $lblModel = New-Object System.Windows.Forms.Label; $lblModel.Text = 'Model (optional, e.g. sonnet or a gateway model name)'; $lblModel.Location = '196,64'; $lblModel.AutoSize = $true
-    $txtModel = New-Object System.Windows.Forms.TextBox; $txtModel.Location = '196,82'; $txtModel.Size = '430,23'; $txtModel.Anchor = 'Top,Left,Right'
-    $lblEnv = New-Object System.Windows.Forms.Label; $lblEnv.Text = 'Environment variables (KEY=VALUE, one per line; leave empty for your normal Claude login)'; $lblEnv.Location = '196,114'; $lblEnv.AutoSize = $true
+    $lblName = New-Object System.Windows.Forms.Label; $lblName.Text = 'Name'
+    $lblName.Location = '196,12'; $lblName.Size = '430,16'; $lblName.AutoSize = $false; $lblName.Anchor = 'Top,Left,Right'
+    $txtName = New-Object System.Windows.Forms.TextBox; $txtName.Location = '196,30'; $txtName.Size = '430,23'; $txtName.Anchor = 'Top,Left,Right'
+    $lblModel = New-Object System.Windows.Forms.Label; $lblModel.Text = 'Model (optional, e.g. sonnet or a gateway model name)'
+    $lblModel.Location = '196,62'; $lblModel.Size = '430,32'; $lblModel.AutoSize = $false; $lblModel.Anchor = 'Top,Left,Right'
+    $txtModel = New-Object System.Windows.Forms.TextBox; $txtModel.Location = '196,96'; $txtModel.Size = '430,23'; $txtModel.Anchor = 'Top,Left,Right'
+    $lblEnv = New-Object System.Windows.Forms.Label; $lblEnv.Text = 'Environment variables (KEY=VALUE, one per line; leave empty for your normal Claude login)'
+    $lblEnv.Location = '196,128'; $lblEnv.Size = '430,32'; $lblEnv.AutoSize = $false; $lblEnv.Anchor = 'Top,Left,Right'
     $txtEnv = New-Object System.Windows.Forms.TextBox
     $txtEnv.Multiline = $true; $txtEnv.ScrollBars = 'Vertical'; $txtEnv.AcceptsReturn = $true; $txtEnv.WordWrap = $false
     $txtEnv.Font = New-Object System.Drawing.Font('Consolas', 9.5)
-    $txtEnv.Location = '196,132'; $txtEnv.Size = '430,220'; $txtEnv.Anchor = 'Top,Bottom,Left,Right'
+    $txtEnv.Location = '196,162'; $txtEnv.Size = '430,190'; $txtEnv.Anchor = 'Top,Bottom,Left,Right'
     foreach ($c in $lblName, $txtName, $lblModel, $txtModel, $lblEnv, $txtEnv) { $f.Controls.Add($c) }
 
     $btnSave = New-Object System.Windows.Forms.Button; $btnSave.Text = 'Save'; $btnSave.Location = '446,372'; $btnSave.Size = '85,30'; $btnSave.Anchor = 'Bottom,Right'
@@ -952,21 +955,21 @@ function Show-TestWindow {
     $txtFull.Multiline = $true; $txtFull.ReadOnly = $true; $txtFull.WordWrap = $true; $txtFull.ScrollBars = 'Vertical'
     $txtFull.BackColor = [System.Drawing.SystemColors]::Window
     $txtFull.Font = New-Object System.Drawing.Font('Consolas', 9.5)
-    $txtFull.Location = '12,238'; $txtFull.Size = '796,110'; $txtFull.Anchor = 'Top,Bottom,Left,Right'
+    $txtFull.Location = '12,238'; $txtFull.Size = '796,96'; $txtFull.Anchor = 'Top,Bottom,Left,Right'
     $f.Controls.Add($txtFull)
 
     $hint = New-Object System.Windows.Forms.Label
     $hint.Text = 'Gateway sources get a 1-token test message. Personal checks reachability and that a login exists.'
-    $hint.Location = '12,356'; $hint.Size = '796,18'; $hint.AutoSize = $false; $hint.AutoEllipsis = $true
-    $hint.Anchor = 'Bottom,Left,Right'; $hint.ForeColor = [System.Drawing.Color]::DimGray
+    $hint.Location = '12,342'; $hint.Size = '358,32'; $hint.AutoSize = $false
+    $hint.Anchor = 'Bottom,Left'; $hint.ForeColor = [System.Drawing.Color]::DimGray
     $f.Controls.Add($hint)
 
-    $btnRun = New-Object System.Windows.Forms.Button; $btnRun.Text = 'Test all'; $btnRun.Size = '85,28'; $btnRun.Location = '632,382'; $btnRun.Anchor = 'Bottom,Right'
-    $btnClose = New-Object System.Windows.Forms.Button; $btnClose.Text = 'Close'; $btnClose.Size = '85,28'; $btnClose.Location = '723,382'; $btnClose.Anchor = 'Bottom,Right'
+    $btnRun = New-Object System.Windows.Forms.Button; $btnRun.Text = 'Test all'; $btnRun.Size = '85,28'; $btnRun.Location = '632,380'; $btnRun.Anchor = 'Bottom,Right'
+    $btnClose = New-Object System.Windows.Forms.Button; $btnClose.Text = 'Close'; $btnClose.Size = '85,28'; $btnClose.Location = '723,380'; $btnClose.Anchor = 'Bottom,Right'
     $btnClose.DialogResult = 'Cancel'
     $btnClose.Add_Click({ $f.Close() }.GetNewClosure())
-    $btnFix = New-Object System.Windows.Forms.Button; $btnFix.Text = 'Troubleshoot...'; $btnFix.Size = '115,28'; $btnFix.Location = '509,382'; $btnFix.Anchor = 'Bottom,Right'
-    $btnUse = New-Object System.Windows.Forms.Button; $btnUse.Text = 'Check usage...'; $btnUse.Size = '115,28'; $btnUse.Location = '384,382'; $btnUse.Anchor = 'Bottom,Right'
+    $btnFix = New-Object System.Windows.Forms.Button; $btnFix.Text = 'Troubleshoot...'; $btnFix.Size = '115,28'; $btnFix.Location = '509,380'; $btnFix.Anchor = 'Bottom,Right'
+    $btnUse = New-Object System.Windows.Forms.Button; $btnUse.Text = 'Check usage...'; $btnUse.Size = '115,28'; $btnUse.Location = '384,380'; $btnUse.Anchor = 'Bottom,Right'
     $btnUse.Add_Click({ Show-UsageWindow })
     $f.Controls.Add($btnUse); $f.Controls.Add($btnFix); $f.Controls.Add($btnRun); $f.Controls.Add($btnClose); $f.CancelButton = $btnClose
 
@@ -1466,17 +1469,17 @@ function Show-UsageWindow {
     $txt = New-Object System.Windows.Forms.TextBox
     $txt.Multiline = $true; $txt.ReadOnly = $true; $txt.WordWrap = $true; $txt.ScrollBars = 'Vertical'
     $txt.BackColor = [System.Drawing.SystemColors]::Window; $txt.Font = New-Object System.Drawing.Font('Consolas', 9.5)
-    $txt.Location = '12,178'; $txt.Size = '796,154'; $txt.Anchor = 'Top,Bottom,Left,Right'
+    $txt.Location = '12,178'; $txt.Size = '796,140'; $txt.Anchor = 'Top,Bottom,Left,Right'
     $f.Controls.Add($txt)
 
     $hint = New-Object System.Windows.Forms.Label
     $hint.Text = 'Personal reads your plan limits from Anthropic (login token stays in memory). Gateways report the key''s spend and budgets.'
-    $hint.Location = '12,340'; $hint.Size = '796,18'; $hint.AutoSize = $false; $hint.AutoEllipsis = $true
-    $hint.Anchor = 'Bottom,Left,Right'; $hint.ForeColor = [System.Drawing.Color]::DimGray
+    $hint.Location = '12,324'; $hint.Size = '600,32'; $hint.AutoSize = $false
+    $hint.Anchor = 'Bottom,Left'; $hint.ForeColor = [System.Drawing.Color]::DimGray
     $f.Controls.Add($hint)
 
-    $btnRefresh = New-Object System.Windows.Forms.Button; $btnRefresh.Text = 'Refresh'; $btnRefresh.Size = '85,28'; $btnRefresh.Location = '632,362'; $btnRefresh.Anchor = 'Bottom,Right'
-    $btnClose = New-Object System.Windows.Forms.Button; $btnClose.Text = 'Close'; $btnClose.Size = '85,28'; $btnClose.Location = '723,362'; $btnClose.Anchor = 'Bottom,Right'
+    $btnRefresh = New-Object System.Windows.Forms.Button; $btnRefresh.Text = 'Refresh'; $btnRefresh.Size = '85,28'; $btnRefresh.Location = '632,360'; $btnRefresh.Anchor = 'Bottom,Right'
+    $btnClose = New-Object System.Windows.Forms.Button; $btnClose.Text = 'Close'; $btnClose.Size = '85,28'; $btnClose.Location = '723,360'; $btnClose.Anchor = 'Bottom,Right'
     $btnClose.DialogResult = 'Cancel'
     $btnClose.Add_Click({ $f.Close() }.GetNewClosure())
     $f.Controls.Add($btnRefresh); $f.Controls.Add($btnClose); $f.CancelButton = $btnClose
