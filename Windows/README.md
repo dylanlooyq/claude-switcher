@@ -5,8 +5,10 @@ claude.ai login and one or more LLM gateways - without hand-editing `settings.js
 
 Each source is a **profile**: a set of environment variables (usually `ANTHROPIC_BASE_URL` plus
 `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`) and an optional model. Switching rewrites the `env` and
-`model` entries in `~/.claude/settings.json` and leaves everything else in that file alone. A profile with
-no env vars (Personal) just clears the gateway settings so Claude Code falls back to your normal login.
+`model` entries in `~/.claude/settings.json` and leaves everything else in that file alone. It also mirrors
+the same env vars into your Windows **User** environment variables, so other tools that read
+`$env:ANTHROPIC_API_KEY` etc. directly see the switch too. A profile with no env vars (Personal) just
+clears the gateway settings so Claude Code falls back to your normal login.
 
 Requires Windows and PowerShell 5.1 (built in). Nothing to install.
 
@@ -30,7 +32,8 @@ and the window opens.
    ```
    Use `ANTHROPIC_API_KEY` instead if your gateway wants the `x-api-key` header. Set **Model** if it needs one.
 3. Click **Save**, then **Switch to this**.
-4. **Restart any running Claude Code sessions** - they only read settings at startup.
+4. **Restart any running Claude Code sessions or terminals** - settings.json is only read at startup, and
+   existing terminals keep the environment variables they started with.
 
 The starter profiles are `personal`, `ica` and `rise`; rename them however you like.
 
@@ -68,13 +71,15 @@ To start at login, put a shortcut in `shell:startup` that runs:
 | `%APPDATA%\claude-switcher\backups\` | Your last 20 `settings.json` versions, one per switch. |
 | `%APPDATA%\claude-switcher\error.log` | Only written if something goes wrong. |
 
-Tokens are also in `~/.claude/settings.json` while that source is active. Never commit or share these files;
-the repo's `.gitignore` excludes them as a safety net.
+Tokens are also in `~/.claude/settings.json` while that source is active, and in your Windows **User**
+environment variables (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`) - check
+`Environment Variables` in Windows settings if you want to see or clear them by hand. Never commit or
+share these files; the repo's `.gitignore` excludes them as a safety net.
 
 ## Good to know
 
-- **Overrides.** A project-level `.claude/settings.json`, or `ANTHROPIC_*` variables set in Windows itself,
-  override what the switcher writes. If a switch does not seem to take effect, check those first.
+- **Overrides.** A project-level `.claude/settings.json`, or a **Machine**-level (system-wide) `ANTHROPIC_*`
+  variable, override what the switcher writes. If a switch does not seem to take effect, check those first.
 - **Personal usage** uses the same undocumented Anthropic endpoint that Claude Code's `/usage` reads, with your
   login token from `~/.claude/.credentials.json`. The token is held in memory only and sent only to
   `api.anthropic.com`. The endpoint rate-limits itself, so the app reuses a fresh result and falls back to the

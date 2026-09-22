@@ -7,6 +7,9 @@
   Each source is a "profile": a set of env vars (e.g. ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN)
   and an optional model. Switching rewrites ~/.claude/settings.json: it removes every env key
   that any profile manages, then applies the chosen profile's values. All other settings are kept.
+  It also mirrors those same keys into your Windows User environment variables (persisted via
+  [Environment]::SetEnvironmentVariable), so tools outside Claude Code that read $env:ANTHROPIC_API_KEY
+  etc. directly see the switch too. Existing processes/terminals only pick this up after they restart.
   A profile with no env vars (Personal) leaves Claude Code on your normal claude.ai login.
 
   Run with no arguments for the tray app, or:
@@ -147,6 +150,21 @@ function Set-ActiveProfile($Cfg, [string]$Id) {
     if ($model) { $settings['model'] = $model } elseif ($settings.Contains('model')) { $settings.Remove('model') }
 
     Write-JsonFile $SettingsPath $settings
+    Set-ManagedUserEnv $Cfg $p
+}
+
+# Mirrors the managed keys into real Windows User environment variables, so tools that read
+# $env:ANTHROPIC_API_KEY etc. directly (outside Claude Code's own settings.json) see the switch too.
+function Set-ManagedUserEnv($Cfg, $Prof) {
+    foreach ($k in (Get-ManagedKeys $Cfg)) {
+        $val = if ($Prof['env'].Contains($k)) { [string]$Prof['env'][$k] } else { '' }
+        $current = [Environment]::GetEnvironmentVariable($k, 'User')
+        if ($val) {
+            if ($current -ne $val) { [Environment]::SetEnvironmentVariable($k, $val, 'User') }
+        } elseif ($null -ne $current) {
+            [Environment]::SetEnvironmentVariable($k, $null, 'User')
+        }
+    }
 }
 
 # ---------- connection tester ----------
