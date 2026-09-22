@@ -1556,6 +1556,36 @@ $script:mainRuns = @()
 $script:mainLastRefresh = [datetime]::MinValue
 $MainAutoRefreshSec = 120
 $CardHeight = 128
+$script:loginRefresh = $null   # @{ Id; Proc; Sw } while a "Refresh login" run is in flight, one at a time
+
+# ---------- login refresh (Personal) ----------
+# We never hold the refresh token or call Anthropic's OAuth endpoint ourselves - that's undocumented
+# and only Claude Code should touch it. Instead we ask the Claude Code CLI, which already knows how
+# to refresh its own token, to do one trivial no-op call. That rewrites .credentials.json for us.
+
+function Start-LoginRefresh {
+    $cmd = Get-Command claude -ErrorAction SilentlyContinue
+    if (-not $cmd) { return @{ Failed = $true; Error = "Couldn't find the 'claude' command on PATH." } }
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'cmd.exe'
+    $psi.Arguments = '/d /c claude -p "hi" >NUL 2>&1'
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    try {
+        $proc = [System.Diagnostics.Process]::Start($psi)
+    } catch {
+        return @{ Failed = $true; Error = $_.Exception.Message }
+    }
+    @{ Failed = $false; Proc = $proc; Sw = [System.Diagnostics.Stopwatch]::StartNew() }
+}
+
+# Polls one refresh run; returns $true once it's done (finished, timed out, or failed to start).
+function Step-LoginRefresh($R) {
+    if ($R.Failed) { return $true }
+    if ($R.Proc.HasExited) { return $true }
+    if ($R.Sw.Elapsed.TotalSeconds -gt 45) { try { $R.Proc.Kill() } catch { }; return $true }
+    $false
+}
 
 function Get-LevelColor([string]$Level) {
     $hex = switch ($Level) { 'ok' { '#107C10' } 'warn' { '#B25000' } 'fail' { '#C42B1C' } default { '#6E6E6E' } }
@@ -1612,6 +1642,23 @@ function Set-CardState([string]$Id) {
         $c.Usage.Text = 'Usage: ' + $u.Summary
         $c.Usage.ForeColor = if ($u.Level -eq 'ok') { Get-LevelColor '' } else { Get-LevelColor $u.Level }
         $script:mainTip.SetToolTip($c.Usage, ($u.Lines -join "`n"))
+    }
+
+    # login refresh (Personal only) - lets a rejected/expired token be fixed without leaving the app
+    if ($c.Login) {
+        if ($script:loginRefresh -and $script:loginRefresh.Id -eq $Id) {
+            $c.Login.Enabled = $false; $c.Login.Text = 'Refreshing...'
+            $script:mainTip.SetToolTip($c.Login, 'Asking the Claude Code CLI to refresh the login token...')
+        } else {
+            $c.Login.Text = 'Refresh login'
+            $u = if ($st) { $st.Usage } else { $null }
+            $needsIt = ($u -and $u.Level -eq 'fail')
+            $c.Login.Enabled = (-not $isGateway -and $needsIt)
+            $script:mainTip.SetToolTip($c.Login, $(
+                    if (-not $isGateway -and $needsIt) { "Runs 'claude -p' in the background so Claude Code refreshes its saved token." }
+                    elseif (-not $u) { 'Checking usage first...' }
+                    else { 'Only needed when the login token has been rejected.' }))
+        }
     }
 }
 
@@ -1675,23 +1722,32 @@ function Update-MainCards {
         $btnSwitch.Add_Click({ param($s, $e) Switch-To ([string]$s.Tag) })
         $card.Controls.Add($btnSwitch)
 
+        $isPersonal = ($p['env'].Count -eq 0)
+
         $btnFix = New-Object System.Windows.Forms.Button
         $btnFix.Text = 'Fix...'; $btnFix.Location = '152,96'; $btnFix.Size = '76,26'; $btnFix.Tag = $id
-        $btnFix.Visible = ($p['env'].Count -gt 0)     # Personal has no gateway settings to fix
-        $btnFix.Enabled = $false                      # enabled by Set-CardState once a check shows a problem
+        $btnFix.Visible = -not $isPersonal             # Personal has no gateway settings to fix
+        $btnFix.Enabled = $false                        # enabled by Set-CardState once a check shows a problem
         $btnFix.Add_Click({
                 param($s, $e)
                 if (Show-Troubleshooter ([string]$s.Tag)) { Start-MainRefresh }
             })
         $card.Controls.Add($btnFix)
 
+        $btnLogin = New-Object System.Windows.Forms.Button
+        $btnLogin.Text = 'Refresh login'; $btnLogin.Location = '152,96'; $btnLogin.Size = '100,26'; $btnLogin.Tag = $id
+        $btnLogin.Visible = $isPersonal                 # only Personal has a login token to refresh
+        $btnLogin.Enabled = $false                       # enabled by Set-CardState once usage shows it's rejected
+        $btnLogin.Add_Click({ param($s, $e) Start-CardLoginRefresh ([string]$s.Tag) })
+        $card.Controls.Add($btnLogin)
+
         $btnEdit = New-Object System.Windows.Forms.Button
-        $btnEdit.Text = 'Edit...'; $btnEdit.Location = '236,96'; $btnEdit.Size = '76,26'; $btnEdit.Tag = $id
+        $btnEdit.Text = 'Edit...'; $btnEdit.Location = $(if ($isPersonal) { '260,96' } else { '236,96' }); $btnEdit.Size = '76,26'; $btnEdit.Tag = $id
         $btnEdit.Add_Click({ param($s, $e) Show-Editor ([string]$s.Tag) })
         $card.Controls.Add($btnEdit)
 
         $panel.Controls.Add($card)
-        $script:mainCards[$id] = @{ Status = $status; Usage = $usage; Fix = $btnFix; Switch = $btnSwitch }
+        $script:mainCards[$id] = @{ Status = $status; Usage = $usage; Fix = $btnFix; Login = $btnLogin; Switch = $btnSwitch }
         $y += $CardHeight + 10
     }
     $panel.ResumeLayout()
@@ -1711,6 +1767,20 @@ function Update-MainCards {
 function Stop-MainRuns {
     foreach ($r in @($script:mainRuns)) { Stop-ProfileTest $r.T; Stop-UsageCheck $r.U }
     $script:mainRuns = @()
+}
+
+function Start-CardLoginRefresh([string]$Id) {
+    if ($script:loginRefresh) { return }     # one refresh at a time
+    $run = Start-LoginRefresh
+    if ($run.Failed) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "$($run.Error)`n`nOpen a terminal, run 'claude', and use /login - then press Refresh login again.",
+            'Claude Switcher', 'OK', 'Warning') | Out-Null
+        return
+    }
+    $script:loginRefresh = @{ Id = $Id; Run = $run }
+    Set-CardState $Id
+    $script:loginRefreshTimer.Start()
 }
 
 function Start-MainRefresh {
@@ -1801,7 +1871,26 @@ function New-MainWindow {
                 $script:mainRefresh.Enabled = $true; $script:mainRefresh.Text = 'Refresh'
             }
         })
-    $f.Add_FormClosed({ $script:mainTimer.Stop() })
+    $f.Add_FormClosed({ $script:mainTimer.Stop(); $script:loginRefreshTimer.Stop() })
+
+    $loginTimer = New-Object System.Windows.Forms.Timer; $loginTimer.Interval = 300
+    $script:loginRefreshTimer = $loginTimer
+    $loginTimer.Add_Tick({
+            $lr = $script:loginRefresh
+            if (-not $lr) { $script:loginRefreshTimer.Stop(); return }
+            if (-not (Step-LoginRefresh $lr.Run)) { return }
+            $script:loginRefreshTimer.Stop()
+            $script:loginRefresh = $null
+            $id = $lr.Id
+            # re-check that one card now that Claude Code has had a chance to refresh the token
+            $p = Find-Profile $script:cfg $id
+            if ($p) {
+                $script:mainState[$id] = @{ Test = $null; Usage = $null }
+                $script:mainRuns += , @{ Id = $id; T = (Start-ProfileTest $p); U = (Start-UsageCheck $p); TDone = $false; UDone = $false }
+                if (-not $script:mainTimer.Enabled) { $script:mainTimer.Start() }
+            }
+            Set-CardState $id
+        })
 }
 
 function Show-MainWindow {
