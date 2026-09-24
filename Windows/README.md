@@ -35,7 +35,23 @@ and the window opens.
 4. **Restart any running Claude Code sessions or terminals** - settings.json is only read at startup, and
    existing terminals keep the environment variables they started with.
 
-The starter profiles are `personal`, `ica` and `rise`; rename them however you like.
+The starter profiles are `personal`, `personal (2nd account)`, `ica` and `rise`; rename them however you like.
+
+### Using a second claude.ai login
+
+"Personal (2nd account)" is a second personal profile, already set up with its own
+`CLAUDE_CONFIG_DIR` (a Claude Code setting that points at a private config folder under
+`%APPDATA%\claude-switcher\accounts\personal2`) so it never touches your main login. To use it:
+
+1. **Switch to this** on the "Personal (2nd account)" card.
+2. Restart any running Claude Code terminals, then open a new one and run `claude`, then `/login`
+   and sign in with the second account.
+
+From then on, switching between "Personal Claude" and "Personal (2nd account)" swaps between the
+two logins, each with its own credentials and usage.
+
+You can add further profiles (a 3rd account, another gateway) from **Edit profiles...** with the
+**Add profile** / **Remove** buttons next to the list.
 
 ## What the window does
 
@@ -45,10 +61,17 @@ The starter profiles are `personal`, `ica` and `rise`; rename them however you l
 | **Fix...** | Troubleshooter for a source that is not working. Greyed out when it is live. |
 | **Test connections...** | Sends a 1-token request to each source and shows the full reply or error. |
 | **Check usage...** | Personal: session and weekly limits with reset times. Gateways: key spend and budgets. |
+| **Check for updates...** | Lists each source's available models and flags a newer Sonnet/Opus/Haiku than the one you have pinned. |
 
 **Fix...** finds and offers fixes for the usual gateway problems: a model name the gateway does not accept
 (it asks the gateway which models your key can use and tests each one), the credential sent in the wrong
 header, and a base URL that wrongly ends in `/v1`. Nothing is changed until you press **Apply fix**.
+
+**Check for updates...** only reads each source's model list (the gateway's `/v1/models`, or Anthropic's for
+a Personal login) and compares it to the model you have pinned - it does not test the candidate model first,
+so nothing changes until you pick a source and press **Update**, and it is worth running **Test connections...**
+again afterwards. Sources with no pinned model (Claude Code's own default) or a custom, non-Claude model name
+are shown as such rather than checked.
 
 ## Command line
 
@@ -75,6 +98,11 @@ Tokens are also in `~/.claude/settings.json` while that source is active, and in
 environment variables (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`) - check
 `Environment Variables` in Windows settings if you want to see or clear them by hand. Never commit or
 share these files; the repo's `.gitignore` excludes them as a safety net.
+
+A personal profile with a `CLAUDE_CONFIG_DIR` env var (like "Personal (2nd account)") keeps its own
+login and settings under `%APPDATA%\claude-switcher\accounts\<profile>\` instead of `~/.claude`.
+`CLAUDE_CONFIG_DIR` only ever lives in the Windows **User** environment variables, never in
+`settings.json` - Claude Code needs it before it can even find that file.
 
 ## Good to know
 

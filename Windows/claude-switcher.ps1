@@ -34,7 +34,11 @@ $ErrorActionPreference = 'Stop'
 $ProfilesPath = Join-Path $ConfigDir 'profiles.json'
 $BackupDir = Join-Path $ConfigDir 'backups'
 # Always cleared on a switch, even if no profile lists them, so nothing leaks between sources.
-$AlwaysManaged = 'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY'
+# CLAUDE_CONFIG_DIR is what lets a second Personal profile have its own separate claude.ai login.
+$AlwaysManaged = 'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CONFIG_DIR'
+# Env keys that mean "this is a gateway profile". A profile without any of these is Personal-type,
+# even if it sets CLAUDE_CONFIG_DIR (that's how a second personal account differs from the first).
+$GatewayKeys = 'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY'
 
 # ---------- JSON helpers ----------
 
@@ -67,6 +71,11 @@ function Write-JsonFile([string]$Path, $Object) {
 
 # ---------- profiles ----------
 
+function New-Personal2Profile {
+    [ordered]@{ id = 'personal2'; name = 'Personal (2nd account)'; color = '#B45309'; model = ''
+        env = [ordered]@{ CLAUDE_CONFIG_DIR = (Join-Path $ConfigDir 'accounts\personal2') } }
+}
+
 function New-DefaultConfig {
     $settings = Read-JsonFile $SettingsPath
     $model = ''
@@ -74,6 +83,7 @@ function New-DefaultConfig {
     [ordered]@{
         profiles = @(
             [ordered]@{ id = 'personal'; name = 'Personal Claude'; color = '#D97757'; model = $model; env = [ordered]@{} },
+            (New-Personal2Profile),
             [ordered]@{ id = 'ica'; name = 'IBM ICA'; color = '#0F62FE'; model = ''
                 env = [ordered]@{ ANTHROPIC_BASE_URL = ''; ANTHROPIC_AUTH_TOKEN = '' } },
             [ordered]@{ id = 'rise'; name = 'RISE API'; color = '#24A148'; model = ''
@@ -82,16 +92,35 @@ function New-DefaultConfig {
     }
 }
 
+function Find-Profile($Cfg, [string]$Id) {
+    foreach ($p in $Cfg['profiles']) { if ($p['id'] -eq $Id) { return $p } }
+    $null
+}
+
+# One-time upgrade for installs whose saved profiles.json predates the 2nd-personal-account
+# profile. Only appends it when missing, so hand-edited profiles.json files aren't clobbered.
+function Merge-DefaultProfiles($Cfg) {
+    if (Find-Profile $Cfg 'personal2') { return $false }
+    $Cfg['profiles'] = @($Cfg['profiles']) + , (New-Personal2Profile)
+    $true
+}
+
 function Get-Config {
-    if (Test-Path -LiteralPath $ProfilesPath) { return Read-JsonFile $ProfilesPath }
+    if (Test-Path -LiteralPath $ProfilesPath) {
+        $cfg = Read-JsonFile $ProfilesPath
+        if (Merge-DefaultProfiles $cfg) { Write-JsonFile $ProfilesPath $cfg }
+        return $cfg
+    }
     $cfg = New-DefaultConfig
     Write-JsonFile $ProfilesPath $cfg
     $cfg
 }
 
-function Find-Profile($Cfg, [string]$Id) {
-    foreach ($p in $Cfg['profiles']) { if ($p['id'] -eq $Id) { return $p } }
-    $null
+# A profile is Personal-type (a claude.ai login, not a gateway) when it has none of the
+# gateway auth keys - it may still set CLAUDE_CONFIG_DIR to isolate a second account's login.
+function Test-PersonalProfile($Prof) {
+    foreach ($k in $GatewayKeys) { if ($Prof['env'].Contains($k)) { return $false } }
+    $true
 }
 
 # A profile is usable unless it has env keys that are still blank (the placeholders).
@@ -107,11 +136,22 @@ function Get-ManagedKeys($Cfg) {
     , $keys
 }
 
-# Work out the active profile from settings.json itself, so manual edits can't leave it stale.
-function Get-ActiveId($Cfg) {
+# CLAUDE_CONFIG_DIR can never live in settings.json - Claude Code needs it to find settings.json
+# in the first place - so its current value has to come from the real Windows User environment.
+function Get-CurrentManagedEnv($Cfg) {
     $settings = Read-JsonFile $SettingsPath
     $senv = [ordered]@{}
-    if ($settings.Contains('env') -and $settings['env'] -is [System.Collections.IDictionary]) { $senv = $settings['env'] }
+    if ($settings.Contains('env') -and $settings['env'] -is [System.Collections.IDictionary]) {
+        foreach ($k in $settings['env'].Keys) { $senv[$k] = $settings['env'][$k] }
+    }
+    $senv['CLAUDE_CONFIG_DIR'] = [string][Environment]::GetEnvironmentVariable('CLAUDE_CONFIG_DIR', 'User')
+    $senv
+}
+
+# Work out the active profile from settings.json (plus the real CLAUDE_CONFIG_DIR env var), so
+# manual edits can't leave it stale.
+function Get-ActiveId($Cfg) {
+    $senv = Get-CurrentManagedEnv $Cfg
     $plain = $null
     foreach ($p in $Cfg['profiles']) {
         $vals = @($p['env'].Keys | Where-Object { [string]$p['env'][$_] -ne '' })
@@ -143,7 +183,9 @@ function Set-ActiveProfile($Cfg, [string]$Id) {
 
     if (-not ($settings.Contains('env') -and $settings['env'] -is [System.Collections.IDictionary])) { $settings['env'] = [ordered]@{} }
     foreach ($k in (Get-ManagedKeys $Cfg)) { if ($settings['env'].Contains($k)) { $settings['env'].Remove($k) } }
-    foreach ($k in $p['env'].Keys) { $settings['env'][$k] = [string]$p['env'][$k] }
+    # CLAUDE_CONFIG_DIR is mirrored to the real Windows User env only (below), never into
+    # settings.json - see Get-CurrentManagedEnv for why.
+    foreach ($k in $p['env'].Keys) { if ($k -ne 'CLAUDE_CONFIG_DIR') { $settings['env'][$k] = [string]$p['env'][$k] } }
     if ($settings['env'].Count -eq 0) { $settings.Remove('env') }
 
     $model = [string]$p['model']
@@ -184,9 +226,16 @@ function New-TestClient {
     $client
 }
 
-function Get-PersonalLoginNote {
+# $ConfigDirOverride is a profile's CLAUDE_CONFIG_DIR (a 2nd personal account's isolated
+# config dir); empty means the default ~/.claude.
+function Get-CredentialsPath([string]$ConfigDirOverride = '') {
+    $dir = if ($ConfigDirOverride) { $ConfigDirOverride } else { Join-Path $env:USERPROFILE '.claude' }
+    Join-Path $dir '.credentials.json'
+}
+
+function Get-PersonalLoginNote([string]$ConfigDirOverride = '') {
     # Reads only the expiry timestamp, never the token itself.
-    $path = Join-Path $env:USERPROFILE '.claude\.credentials.json'
+    $path = Get-CredentialsPath $ConfigDirOverride
     if (-not (Test-Path -LiteralPath $path)) { return @{ Found = $false; Text = 'no login found - run "claude" and use /login' } }
     try {
         $oauth = (Read-JsonFile $path)['claudeAiOauth']
@@ -296,12 +345,13 @@ function Start-ProfileTest($Prof) {
     $t = [ordered]@{
         Id = $Prof['id']; Name = $Prof['name']; Kind = 'gateway'; Task = $null; Client = $null
         Failure = $null; Item = $null; Shown = $false; Sw = [System.Diagnostics.Stopwatch]::StartNew()
+        ConfigDir = [string]$Prof['env']['CLAUDE_CONFIG_DIR']
     }
     if (-not (Test-Configured $Prof)) {
         $t.Failure = @{ Level = 'warn'; Text = 'Not configured - fill in the blank values first.' }
         return $t
     }
-    if ($Prof['env'].Count -eq 0) {
+    if (Test-PersonalProfile $Prof) {
         $t.Kind = 'personal'
         $t.Client = New-TestClient
         $t.Task = $t.Client.GetAsync('https://api.anthropic.com/')
@@ -331,7 +381,7 @@ function Get-TestOutcome($T) {
     $suffix = if ($detail) { " - $detail" } else { '' }
 
     if ($T.Kind -eq 'personal') {
-        $login = Get-PersonalLoginNote
+        $login = Get-PersonalLoginNote $T.ConfigDir
         $lvl = if ($login.Found) { 'ok' } else { 'warn' }
         return @{ Level = $lvl; Ms = $ms; Text = "api.anthropic.com reachable; $($login.Text). (Login not verified server-side.)" }
     }
@@ -431,9 +481,9 @@ function Add-BudgetLine($U, [string]$Label, $Spend, $Max, $Duration, $ResetAt) {
     }
 }
 
-function New-PersonalUsageProbe {
+function New-PersonalUsageProbe([string]$ConfigDirOverride = '') {
     $tok = ''
-    try { $tok = [string]((Read-JsonFile (Join-Path $env:USERPROFILE '.claude\.credentials.json'))['claudeAiOauth']['accessToken']) } catch { }
+    try { $tok = [string]((Read-JsonFile (Get-CredentialsPath $ConfigDirOverride))['claudeAiOauth']['accessToken']) } catch { }
     if (-not $tok) { return $null }
     $client = New-TestClient
     $req = New-Object System.Net.Http.HttpRequestMessage -ArgumentList (New-Object System.Net.Http.HttpMethod -ArgumentList 'GET'), 'https://api.anthropic.com/api/oauth/usage'
@@ -468,7 +518,7 @@ function Start-UsageCheck($Prof) {
         $u.Level = 'warn'; $u.Summary = 'Not configured'; $u.Lines.Add('Fill in the blank values first (Edit profiles).'); $u.Done = $true
         return $u
     }
-    if ($Prof['env'].Count -eq 0) {
+    if (Test-PersonalProfile $Prof) {
         $u.Kind = 'personal'
         $cached = Get-UsageCache $u.Id
         if ($cached) {
@@ -480,7 +530,7 @@ function Start-UsageCheck($Prof) {
                 return $u
             }
         }
-        $probe = New-PersonalUsageProbe
+        $probe = New-PersonalUsageProbe ([string]$Prof['env']['CLAUDE_CONFIG_DIR'])
         if (-not $probe) {
             $u.Level = 'fail'; $u.Summary = 'No login found'; $u.Lines.Add('No Claude login token found. Run "claude" in a terminal and use /login.'); $u.Done = $true
             return $u
@@ -786,6 +836,7 @@ function Update-Tray {
     [void]$script:menu.Items.Add('-')
     $test = $script:menu.Items.Add('Test connections...'); $test.Add_Click({ Show-TestWindow })
     $usage = $script:menu.Items.Add('Check usage...'); $usage.Add_Click({ Show-UsageWindow })
+    $upd = $script:menu.Items.Add('Check for updates...'); $upd.Add_Click({ Show-ModelUpdateWindow })
     $edit = $script:menu.Items.Add('Edit profiles...'); $edit.Add_Click({ Show-Editor })
     $open = $script:menu.Items.Add('Open settings.json'); $open.Add_Click({ Start-Process notepad.exe -ArgumentList "`"$SettingsPath`"" })
     $bk = $script:menu.Items.Add('Open backups folder'); $bk.Add_Click({
@@ -852,13 +903,23 @@ function Show-Editor([string]$SelectId = '') {
     $f = New-Object System.Windows.Forms.Form
     $f.Text = 'Claude Switcher - Profiles'
     $f.StartPosition = 'CenterScreen'
-    $f.ClientSize = New-Object System.Drawing.Size(640, 420)
-    $f.MinimumSize = New-Object System.Drawing.Size(560, 380)
+    $f.ClientSize = New-Object System.Drawing.Size(640, 452)
+    $f.MinimumSize = New-Object System.Drawing.Size(560, 412)
     $f.Font = New-Object System.Drawing.Font('Segoe UI', 9)
 
     $list = New-Object System.Windows.Forms.ListBox
-    $list.Location = '12,12'; $list.Size = '170,340'; $list.Anchor = 'Top,Bottom,Left'
+    $list.Location = '12,12'; $list.Size = '170,306'; $list.Anchor = 'Top,Bottom,Left'
     $f.Controls.Add($list)
+
+    $btnAdd = New-Object System.Windows.Forms.Button; $btnAdd.Text = 'Add profile'
+    $btnAdd.Location = '12,326'; $btnAdd.Size = '82,28'; $btnAdd.Anchor = 'Bottom,Left'
+    $btnRemove = New-Object System.Windows.Forms.Button; $btnRemove.Text = 'Remove'
+    $btnRemove.Location = '100,326'; $btnRemove.Size = '82,28'; $btnRemove.Anchor = 'Bottom,Left'
+    $btnUp = New-Object System.Windows.Forms.Button; $btnUp.Text = 'Move up'
+    $btnUp.Location = '12,358'; $btnUp.Size = '82,28'; $btnUp.Anchor = 'Bottom,Left'
+    $btnDown = New-Object System.Windows.Forms.Button; $btnDown.Text = 'Move down'
+    $btnDown.Location = '100,358'; $btnDown.Size = '82,28'; $btnDown.Anchor = 'Bottom,Left'
+    $f.Controls.Add($btnAdd); $f.Controls.Add($btnRemove); $f.Controls.Add($btnUp); $f.Controls.Add($btnDown)
 
     $lblName = New-Object System.Windows.Forms.Label; $lblName.Text = 'Name'
     $lblName.Location = '196,12'; $lblName.Size = '430,16'; $lblName.AutoSize = $false; $lblName.Anchor = 'Top,Left,Right'
@@ -874,8 +935,8 @@ function Show-Editor([string]$SelectId = '') {
     $txtEnv.Location = '196,162'; $txtEnv.Size = '430,190'; $txtEnv.Anchor = 'Top,Bottom,Left,Right'
     foreach ($c in $lblName, $txtName, $lblModel, $txtModel, $lblEnv, $txtEnv) { $f.Controls.Add($c) }
 
-    $btnSave = New-Object System.Windows.Forms.Button; $btnSave.Text = 'Save'; $btnSave.Location = '446,372'; $btnSave.Size = '85,30'; $btnSave.Anchor = 'Bottom,Right'
-    $btnClose = New-Object System.Windows.Forms.Button; $btnClose.Text = 'Close'; $btnClose.Location = '541,372'; $btnClose.Size = '85,30'; $btnClose.Anchor = 'Bottom,Right'
+    $btnSave = New-Object System.Windows.Forms.Button; $btnSave.Text = 'Save'; $btnSave.Location = '446,404'; $btnSave.Size = '85,30'; $btnSave.Anchor = 'Bottom,Right'
+    $btnClose = New-Object System.Windows.Forms.Button; $btnClose.Text = 'Close'; $btnClose.Location = '541,404'; $btnClose.Size = '85,30'; $btnClose.Anchor = 'Bottom,Right'
     $btnClose.DialogResult = 'Cancel'
     $f.Controls.Add($btnSave); $f.Controls.Add($btnClose); $f.CancelButton = $btnClose
 
@@ -919,6 +980,67 @@ function Show-Editor([string]$SelectId = '') {
             $script:edFields.Name.Text = [string]$p['name']
             $script:edFields.Model.Text = [string]$p['model']
             $script:edFields.Env.Text = ConvertTo-EnvText $p['env']
+        })
+
+    $btnAdd.Add_Click({
+            $n = 1
+            while (Find-Profile $script:edCfg "profile-$n") { $n++ }
+            $newP = [ordered]@{ id = "profile-$n"; name = "New profile $n"; color = '#6E6E6E'; model = ''; env = [ordered]@{} }
+            $script:edCfg['profiles'] = @($script:edCfg['profiles']) + , $newP
+            [void]$script:edFields.List.Items.Add($newP['name'])
+            $script:edFields.List.SelectedIndex = $script:edFields.List.Items.Count - 1
+            $script:edFields.Name.Focus(); $script:edFields.Name.SelectAll()
+        })
+
+    $btnRemove.Add_Click({
+            $i = $script:edFields.List.SelectedIndex
+            if ($i -lt 0) { return }
+            if ($script:edCfg['profiles'].Count -le 1) {
+                [void][System.Windows.Forms.MessageBox]::Show('At least one profile must remain.', 'Claude Switcher')
+                return
+            }
+            $p = $script:edCfg['profiles'][$i]
+            $msg = "Remove '$($p['name'])'?"
+            if ($p['id'] -eq (Get-ActiveId $script:edCfg)) { $msg += "`n`nThis is currently the active source." }
+            if ([System.Windows.Forms.MessageBox]::Show($msg, 'Claude Switcher', 'YesNo', 'Warning') -ne 'Yes') { return }
+
+            $script:edIndex = -1     # skip the pending-commit path below - the removed profile is gone
+            $script:edCfg['profiles'] = @($script:edCfg['profiles'] | Where-Object { $_ -ne $p })
+            $script:edBusy = $true
+            try { $script:edFields.List.Items.RemoveAt($i) } finally { $script:edBusy = $false }
+
+            $newSel = [Math]::Min($i, $script:edFields.List.Items.Count - 1)
+            if ($newSel -ge 0) { $script:edFields.List.SelectedIndex = $newSel }
+        })
+
+    # $script:-scoped (not a local $swap) and no .GetNewClosure() on the buttons below - a
+    # GetNewClosure() scriptblock attached via Add_Click silently never fires when the click
+    # is dispatched through this dialog's own ShowDialog() message loop.
+    $script:edSwap = {
+        param([int]$i, [int]$j)
+        & $script:edCommit
+        $arr = @($script:edCfg['profiles'])
+        $tmp = $arr[$i]; $arr[$i] = $arr[$j]; $arr[$j] = $tmp
+        $script:edCfg['profiles'] = $arr
+        $script:edBusy = $true
+        try {
+            $script:edFields.List.Items.RemoveAt($i)
+            $script:edFields.List.Items.Insert($j, [string]$arr[$j]['name'])
+            $script:edFields.List.SelectedIndex = $j
+        } finally { $script:edBusy = $false }
+        $script:edIndex = $j
+    }
+
+    $btnUp.Add_Click({
+            $i = $script:edFields.List.SelectedIndex
+            if ($i -le 0) { return }
+            & $script:edSwap $i ($i - 1)
+        })
+
+    $btnDown.Add_Click({
+            $i = $script:edFields.List.SelectedIndex
+            if ($i -lt 0 -or $i -ge $script:edCfg['profiles'].Count - 1) { return }
+            & $script:edSwap $i ($i + 1)
         })
 
     $btnSave.Add_Click({
@@ -1092,41 +1214,56 @@ function Get-ModelVersion([string]$Name) {
     $nums
 }
 
+# -1/0/1 as A's version is older/same/newer than B's, comparing each numeric component in turn.
+function Compare-ModelVersion([string]$A, [string]$B) {
+    $va = @(Get-ModelVersion $A); $vb = @(Get-ModelVersion $B)
+    for ($i = 0; $i -lt [Math]::Max($va.Count, $vb.Count); $i++) {
+        $x = if ($i -lt $va.Count) { $va[$i] } else { -1 }
+        $y = if ($i -lt $vb.Count) { $vb[$i] } else { -1 }
+        if ($x -ne $y) { return [Math]::Sign($x - $y) }
+    }
+    0
+}
+
 # First model matching the earliest pattern; among several matches the newest version wins.
 function Get-PreferredModel($List, [string[]]$Patterns, [string]$Fallback) {
     foreach ($pat in $Patterns) {
-        $best = $null; $bestVer = @()
+        $best = $null
         foreach ($m in $List) {
             if ($m -notmatch $pat) { continue }
-            $ver = @(Get-ModelVersion $m)
-            $newer = $false
-            if ($null -eq $best) { $newer = $true }
-            else {
-                for ($i = 0; $i -lt [Math]::Max($ver.Count, $bestVer.Count); $i++) {
-                    $a = if ($i -lt $ver.Count) { $ver[$i] } else { -1 }
-                    $b = if ($i -lt $bestVer.Count) { $bestVer[$i] } else { -1 }
-                    if ($a -ne $b) { $newer = ($a -gt $b); break }
-                }
-            }
-            if ($newer) { $best = $m; $bestVer = $ver }
+            if ($null -eq $best -or (Compare-ModelVersion $m $best) -gt 0) { $best = $m }
         }
         if ($best) { return $best }
     }
     $Fallback
 }
 
-# Model names to try: whatever the gateway lists, plus any names quoted in its error text
-# (e.g. "can only access models=['global-models']"), Claude-looking names first.
-function Get-ModelCandidates($Models, $Base, [string]$Tried) {
+# Model ids from a /v1/models-style JSON reply: either {"data": [...]} or a bare array, of
+# strings or {"id": ...} objects.
+function Get-ModelListIds($R) {
     $found = New-Object System.Collections.Generic.List[string]
-    if ($Models -and $Models.Kind -eq 'http' -and $Models.Code -ge 200 -and $Models.Code -lt 300 -and $Models.Json) {
+    if ($R -and $R.Kind -eq 'http' -and $R.Code -ge 200 -and $R.Code -lt 300 -and $R.Json) {
         $items = @()
-        if ($Models.Json.data) { $items = @($Models.Json.data) } elseif ($Models.Json -is [System.Array]) { $items = @($Models.Json) }
+        if ($R.Json.data) { $items = @($R.Json.data) } elseif ($R.Json -is [System.Array]) { $items = @($R.Json) }
         foreach ($m in $items) {
             $id = if ($m -is [string]) { $m } else { [string]$m.id }
             if ($id -and -not $found.Contains($id)) { $found.Add($id) }
         }
     }
+    , $found
+}
+
+# Which of Claude Code's model-alias families a model name belongs to, or $null for a custom name.
+function Get-ModelFamily([string]$Name) {
+    foreach ($pat in '(?i)opus', '(?i)sonnet', '(?i)haiku') { if ($Name -match $pat) { return $pat } }
+    $null
+}
+
+# Model names to try: whatever the gateway lists, plus any names quoted in its error text
+# (e.g. "can only access models=['global-models']"), Claude-looking names first.
+function Get-ModelCandidates($Models, $Base, [string]$Tried) {
+    $found = New-Object System.Collections.Generic.List[string]
+    $found.AddRange((Get-ModelListIds $Models))
     foreach ($src in @($Base.Detail, $(if ($Models) { $Models.Detail }))) {
         foreach ($m in [regex]::Matches([string]$src, '(?i)models?\s*=\s*\[([^\]]*)\]')) {
             foreach ($q in [regex]::Matches($m.Groups[1].Value, '[''"]([^''"]+)[''"]')) {
@@ -1381,8 +1518,8 @@ function Show-Troubleshooter([string]$Id) {
     $cfg = Get-Config
     $p = Find-Profile $cfg $Id
     if (-not $p) { return $false }
-    if ($p['env'].Count -eq 0) {
-        [void][System.Windows.Forms.MessageBox]::Show('Personal Claude uses your claude.ai login, so there are no gateway settings to fix here. If it fails, open a terminal, run "claude" and use /login.', 'Claude Switcher')
+    if (Test-PersonalProfile $p) {
+        [void][System.Windows.Forms.MessageBox]::Show('Personal profiles use your claude.ai login, so there are no gateway settings to fix here. If it fails, open a terminal, run "claude" and use /login.', 'Claude Switcher')
         return $false
     }
     if (-not (Test-Configured $p)) {
@@ -1459,6 +1596,110 @@ function Show-Troubleshooter([string]$Id) {
     $f.Dispose()
     return [bool]$script:tsApplied
 }
+
+# ---------- model update check ----------
+# For each profile, asks that source for its model list (the gateway's /v1/models, or Anthropic's
+# for Personal using the same login token as the usage check) and offers to update any pinned model
+# - the main model/ANTHROPIC_MODEL pin, plus each of ANTHROPIC_DEFAULT_SONNET/OPUS/HAIKU_MODEL that's
+# set - if a newer version of the same family is listed. A profile can produce several rows, one per
+# pin, all sharing a single model-list fetch. Read-only until you press Update; the candidate is not
+# test-called first, so re-run Test connections after.
+
+function New-PersonalModelListProbe([string]$ConfigDirOverride = '') {
+    $tok = ''
+    try { $tok = [string]((Read-JsonFile (Get-CredentialsPath $ConfigDirOverride))['claudeAiOauth']['accessToken']) } catch { }
+    if (-not $tok) { return $null }
+    $client = New-TestClient
+    $req = New-Object System.Net.Http.HttpRequestMessage -ArgumentList (New-Object System.Net.Http.HttpMethod -ArgumentList 'GET'), 'https://api.anthropic.com/v1/models?limit=1000'
+    [void]$req.Headers.TryAddWithoutValidation('Authorization', "Bearer $tok")
+    [void]$req.Headers.TryAddWithoutValidation('anthropic-version', '2023-06-01')
+    [void]$req.Headers.TryAddWithoutValidation('anthropic-beta', 'oauth-2025-04-20')
+    [void]$req.Headers.TryAddWithoutValidation('User-Agent', 'claude-switcher/1.0')
+    $tok = $null
+    [ordered]@{ Client = $client; Task = $client.SendAsync($req); Sw = [System.Diagnostics.Stopwatch]::StartNew() }
+}
+
+# Every model this profile pins, and where each one lives: the main model/ANTHROPIC_MODEL pin
+# (whichever is set, 'model' taking priority), plus each per-alias ANTHROPIC_DEFAULT_*_MODEL that's
+# set. A profile can have several of these at once (e.g. a gateway profile pinning its own Opus and
+# Haiku defaults alongside a main Sonnet pin).
+function Get-PinnedModels($Prof) {
+    $pins = New-Object System.Collections.Generic.List[object]
+    if ([string]$Prof['model']) { $pins.Add(@{ Value = [string]$Prof['model']; Field = 'model' }) }
+    elseif ([string]$Prof['env']['ANTHROPIC_MODEL']) { $pins.Add(@{ Value = [string]$Prof['env']['ANTHROPIC_MODEL']; Field = 'env:ANTHROPIC_MODEL' }) }
+    foreach ($k in 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL') {
+        if ([string]$Prof['env'][$k]) { $pins.Add(@{ Value = [string]$Prof['env'][$k]; Field = "env:$k" }) }
+    }
+    , $pins
+}
+
+function Set-PinnedModel($Prof, [string]$Field, [string]$Value) {
+    if ($Field -eq 'model') { $Prof['model'] = $Value } else { $Prof['env'][($Field -replace '^env:', '')] = $Value }
+}
+
+function New-ModelCheckBase($Prof) {
+    [ordered]@{
+        Id = $Prof['id']; Name = $Prof['name']; Done = $false; Level = 'ok'; Text = ''
+        Current = ''; Latest = ''; Field = ''; Probe = $null; Item = $null; Shown = $false
+    }
+}
+
+# Starts every check for this profile without blocking (one row per pin, sharing one model-list
+# probe); poll Step-ModelCheck on each until it returns $true.
+function Start-ModelChecks($Prof) {
+    if (-not (Test-Configured $Prof)) {
+        $c = New-ModelCheckBase $Prof
+        $c.Level = 'warn'; $c.Text = 'Not configured - fill in the blank values first.'; $c.Done = $true
+        return @($c)
+    }
+    $pins = @(Get-PinnedModels $Prof)
+    if ($pins.Count -eq 0) {
+        $c = New-ModelCheckBase $Prof
+        $c.Text = "No model pinned - $(if (Test-PersonalProfile $Prof) { 'Claude Code' } else { 'this profile' }) always uses the latest default."
+        $c.Done = $true
+        return @($c)
+    }
+    if (Test-PersonalProfile $Prof) {
+        $probe = New-PersonalModelListProbe ([string]$Prof['env']['CLAUDE_CONFIG_DIR'])
+        if (-not $probe) {
+            $c = New-ModelCheckBase $Prof
+            $c.Level = 'fail'; $c.Text = 'No login found. Run "claude" and use /login.'; $c.Done = $true
+            return @($c)
+        }
+    } else {
+        $probe = New-GatewayProbe $Prof @{ Key = 'models'; Method = 'GET'; Path = '/v1/models' }
+    }
+    @($pins | ForEach-Object {
+            $c = New-ModelCheckBase $Prof
+            $c.Current = $_.Value; $c.Field = $_.Field; $c.Probe = $probe
+            $c
+        })
+}
+
+function Step-ModelCheck($C) {
+    if ($C.Done) { return $true }
+    if (-not $C.Probe.Task.IsCompleted) { return $false }
+    $r = Get-ProbeResult $C.Probe.Task
+    if ($r.Kind -eq 'net' -or $r.Code -lt 200 -or $r.Code -ge 300) {
+        $C.Level = 'warn'; $C.Text = "Could not list models ($(Get-ShortDetail $r))."; $C.Done = $true; return $true
+    }
+    $ids = @(Get-ModelListIds $r)
+    if ($ids.Count -eq 0) { $C.Level = 'warn'; $C.Text = 'No models were listed.'; $C.Done = $true; return $true }
+    $fam = Get-ModelFamily $C.Current
+    if (-not $fam) {
+        $C.Text = "Custom model name - can't auto-detect a newer version ($($ids.Count) model(s) listed)."; $C.Done = $true; return $true
+    }
+    $best = Get-PreferredModel $ids @($fam) $C.Current
+    if ($best -eq $C.Current -or (Compare-ModelVersion $best $C.Current) -le 0) {
+        $C.Text = "Up to date ($($C.Current))."
+    } else {
+        $C.Level = 'update'; $C.Latest = $best; $C.Text = "Update available: $($C.Current)  ->  $best"
+    }
+    $C.Done = $true
+    $true
+}
+
+function Stop-ModelCheck($C) { if ($C.Probe -and $C.Probe.Client) { $C.Probe.Client.Dispose() } }
 
 # ---------- usage window ----------
 
@@ -1564,6 +1805,133 @@ function Show-UsageWindow {
     & $start
 }
 
+# ---------- model update window ----------
+
+function Show-ModelUpdateWindow {
+    if ($script:updForm -and -not $script:updForm.IsDisposed) { $script:updForm.Activate(); return }
+
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = 'Claude Switcher - Check for model updates'
+    $f.StartPosition = 'CenterScreen'
+    $f.ClientSize = New-Object System.Drawing.Size(820, 420)
+    $f.MinimumSize = New-Object System.Drawing.Size(600, 340)
+    $f.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+
+    $lv = New-Object System.Windows.Forms.ListView
+    $lv.View = 'Details'; $lv.FullRowSelect = $true; $lv.MultiSelect = $false; $lv.GridLines = $true; $lv.HideSelection = $false; $lv.ShowItemToolTips = $true
+    $lv.Location = '12,12'; $lv.Size = '796,180'; $lv.Anchor = 'Top,Left,Right'
+    [void]$lv.Columns.Add('Source', 150)
+    [void]$lv.Columns.Add('Field', 90)
+    [void]$lv.Columns.Add('Status', 540)
+    $f.Controls.Add($lv)
+
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = 'Details for the selected source'; $lbl.Location = '12,198'; $lbl.AutoSize = $true
+    $f.Controls.Add($lbl)
+
+    $txt = New-Object System.Windows.Forms.TextBox
+    $txt.Multiline = $true; $txt.ReadOnly = $true; $txt.WordWrap = $true; $txt.ScrollBars = 'Vertical'
+    $txt.BackColor = [System.Drawing.SystemColors]::Window; $txt.Font = New-Object System.Drawing.Font('Consolas', 9.5)
+    $txt.Location = '12,216'; $txt.Size = '796,102'; $txt.Anchor = 'Top,Bottom,Left,Right'
+    $f.Controls.Add($txt)
+
+    $hint = New-Object System.Windows.Forms.Label
+    $hint.Text = "Reads each source's model list and compares it to the model pinned in its profile. This only reads the list - it does not test the new model, so re-run Test connections afterwards."
+    $hint.Location = '12,324'; $hint.Size = '796,32'; $hint.AutoSize = $false
+    $hint.Anchor = 'Bottom,Left,Right'; $hint.ForeColor = [System.Drawing.Color]::DimGray
+    $f.Controls.Add($hint)
+
+    $btnUpdate = New-Object System.Windows.Forms.Button; $btnUpdate.Text = 'Update'; $btnUpdate.Size = '90,28'; $btnUpdate.Location = '521,380'; $btnUpdate.Anchor = 'Bottom,Right'; $btnUpdate.Enabled = $false
+    $btnRefresh = New-Object System.Windows.Forms.Button; $btnRefresh.Text = 'Check again'; $btnRefresh.Size = '100,28'; $btnRefresh.Location = '617,380'; $btnRefresh.Anchor = 'Bottom,Right'
+    $btnClose = New-Object System.Windows.Forms.Button; $btnClose.Text = 'Close'; $btnClose.Size = '85,28'; $btnClose.Location = '723,380'; $btnClose.Anchor = 'Bottom,Right'
+    $btnClose.DialogResult = 'Cancel'
+    $btnClose.Add_Click({ $f.Close() }.GetNewClosure())
+    $f.Controls.Add($btnUpdate); $f.Controls.Add($btnRefresh); $f.Controls.Add($btnClose); $f.CancelButton = $btnClose
+
+    $script:updForm = $f; $script:updList = $lv; $script:updText = $txt; $script:updBtn = $btnRefresh; $script:updApply = $btnUpdate
+    $script:updRuns = @()
+
+    $lv.Add_SelectedIndexChanged({
+            if ($script:updList.SelectedItems.Count -eq 0) { $script:updApply.Enabled = $false; return }
+            $item = $script:updList.SelectedItems[0]
+            $script:updText.Text = [string]$item.Tag
+            $c = @($script:updRuns | Where-Object { $_.Item -eq $item })[0]
+            $script:updApply.Enabled = [bool]($c -and $c.Level -eq 'update')
+        })
+
+    $timer = New-Object System.Windows.Forms.Timer; $timer.Interval = 200
+    $script:updTimer = $timer
+    $timer.Add_Tick({
+            $pending = 0
+            foreach ($c in $script:updRuns) {
+                if (Step-ModelCheck $c) {
+                    if (-not $c.Shown) {
+                        $c.Shown = $true
+                        $item = $c.Item
+                        $item.SubItems[1].Text = $(if ($c.Field -eq 'model') { 'Model' } elseif ($c.Field) { $c.Field -replace '^env:', '' } else { '' })
+                        $item.SubItems[2].Text = $c.Text
+                        $item.ToolTipText = $c.Text
+                        $item.Tag = $c.Text
+                        $item.ForeColor = @{ ok = [System.Drawing.Color]::DarkGreen; warn = [System.Drawing.Color]::DarkOrange; fail = [System.Drawing.Color]::Firebrick; update = [System.Drawing.Color]::MediumBlue }[$c.Level]
+                        if ($item.Selected) { $script:updText.Text = [string]$item.Tag; $script:updApply.Enabled = ($c.Level -eq 'update') }
+                    }
+                } else { $pending++ }
+            }
+            if ($pending -eq 0) {
+                $script:updTimer.Stop(); $script:updBtn.Enabled = $true; $script:updBtn.Text = 'Check again'
+                if ($script:updList.SelectedItems.Count -eq 0 -and $script:updList.Items.Count -gt 0) { $script:updList.Items[0].Selected = $true }
+            }
+        })
+
+    $start = {
+        foreach ($c in $script:updRuns) { Stop-ModelCheck $c }
+        $script:updRuns = @()
+        $script:updList.Items.Clear()
+        $script:updText.Text = ''
+        $script:updApply.Enabled = $false
+        $cfg = Get-Config
+        $active = Get-ActiveId $cfg
+        foreach ($p in $cfg['profiles']) {
+            $label = $p['name']; if ($p['id'] -eq $active) { $label += ' (active)' }
+            foreach ($c in @(Start-ModelChecks $p)) {
+                $item = New-Object System.Windows.Forms.ListViewItem($label)
+                [void]$item.SubItems.Add(''); [void]$item.SubItems.Add('checking...')
+                [void]$script:updList.Items.Add($item)
+                $c.Item = $item
+                $script:updRuns += , $c
+            }
+        }
+        $script:updBtn.Enabled = $false; $script:updBtn.Text = 'Checking...'
+        $script:updTimer.Start()
+    }
+    $script:updStart = $start
+    $btnRefresh.Add_Click({ & $script:updStart })
+    $btnUpdate.Add_Click({
+            if ($script:updList.SelectedItems.Count -eq 0) { return }
+            $item = $script:updList.SelectedItems[0]
+            $c = @($script:updRuns | Where-Object { $_.Item -eq $item })[0]
+            if (-not $c -or $c.Level -ne 'update') { return }
+            $cfg = Get-Config
+            $p = Find-Profile $cfg $c.Id
+            if (-not $p) { return }
+            Set-PinnedModel $p $c.Field $c.Latest
+            Write-JsonFile $ProfilesPath $cfg
+            $script:cfg = $cfg
+            $wasActive = (Get-ActiveId $cfg) -eq $c.Id
+            try { if ($wasActive) { Set-ActiveProfile $cfg $c.Id } } catch { [void][System.Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Claude Switcher') }
+            Update-Tray
+            Show-Balloon 'Model updated' "$($p['name']): $($c.Current) -> $($c.Latest)$(if ($wasActive) { ' (settings.json updated - restart Claude Code sessions)' } else { '' })"
+            & $script:updStart
+        })
+    $f.Add_FormClosed({
+            $script:updTimer.Stop(); $script:updTimer.Dispose()
+            foreach ($c in $script:updRuns) { Stop-ModelCheck $c }
+        })
+
+    $f.Show()
+    & $start
+}
+
 # ---------- main window ----------
 # The dashboard that opens on a left-click of the tray icon: one card per source with its live
 # status and usage, and buttons to switch, fix or edit it. Closing it only hides it.
@@ -1574,6 +1942,8 @@ $script:mainRuns = @()
 $script:mainLastRefresh = [datetime]::MinValue
 $MainAutoRefreshSec = 120
 $CardHeight = 128
+$FootHeight = 76
+$WinWidth = 614
 $script:loginRefresh = $null   # @{ Id; Proc; Sw } while a "Refresh login" run is in flight, one at a time
 
 # ---------- login refresh (Personal) ----------
@@ -1581,7 +1951,7 @@ $script:loginRefresh = $null   # @{ Id; Proc; Sw } while a "Refresh login" run i
 # and only Claude Code should touch it. Instead we ask the Claude Code CLI, which already knows how
 # to refresh its own token, to do one trivial no-op call. That rewrites .credentials.json for us.
 
-function Start-LoginRefresh {
+function Start-LoginRefresh([string]$ConfigDirOverride = '') {
     $cmd = Get-Command claude -ErrorAction SilentlyContinue
     if (-not $cmd) { return @{ Failed = $true; Error = "Couldn't find the 'claude' command on PATH." } }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -1589,12 +1959,44 @@ function Start-LoginRefresh {
     $psi.Arguments = '/d /c claude -p "hi" >NUL 2>&1'
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
+    # Force the right CLAUDE_CONFIG_DIR for this profile rather than relying on this process's
+    # own (possibly stale) environment - the tray app may have started before a later switch.
+    if ($ConfigDirOverride) { $psi.EnvironmentVariables['CLAUDE_CONFIG_DIR'] = $ConfigDirOverride }
+    elseif ($psi.EnvironmentVariables.ContainsKey('CLAUDE_CONFIG_DIR')) { $psi.EnvironmentVariables.Remove('CLAUDE_CONFIG_DIR') }
     try {
         $proc = [System.Diagnostics.Process]::Start($psi)
     } catch {
         return @{ Failed = $true; Error = $_.Exception.Message }
     }
     @{ Failed = $false; Proc = $proc; Sw = [System.Diagnostics.Stopwatch]::StartNew() }
+}
+
+# Opens a real, visible console already running `claude` so the user can type /login and finish
+# the OAuth sign-in in their browser. We can't do this silently in the background like the refresh
+# above - a first-time login needs an interactive console, not just a no-op API call.
+#
+# Uses ShellExecute (not a raw CreateProcess) because this app is a pure GUI process with no
+# console of its own: on Windows 11, with Windows Terminal set as the default terminal app, a
+# console spawned via CreateProcess from a console-less GUI process can silently fail the
+# terminal-handoff and never show a window, even though Process.Start() itself reports success.
+# ShellExecute goes through the same path Explorer uses to open a .exe and doesn't hit that bug.
+# The tradeoff: EnvironmentVariables is ignored when UseShellExecute is true, so
+# CLAUDE_CONFIG_DIR has to be set (or cleared) via the command line instead.
+function Start-Login([string]$ConfigDirOverride = '') {
+    $cmd = Get-Command claude -ErrorAction SilentlyContinue
+    if (-not $cmd) { return @{ Failed = $true; Error = "Couldn't find the 'claude' command on PATH." } }
+    $setEnv = if ($ConfigDirOverride) { "set `"CLAUDE_CONFIG_DIR=$ConfigDirOverride`" && " } else { 'set CLAUDE_CONFIG_DIR=&& ' }
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'cmd.exe'
+    $psi.Arguments = "/k ${setEnv}claude"
+    $psi.UseShellExecute = $true
+    $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal
+    try {
+        [void][System.Diagnostics.Process]::Start($psi)
+    } catch {
+        return @{ Failed = $true; Error = $_.Exception.Message }
+    }
+    @{ Failed = $false }
 }
 
 # Polls one refresh run; returns $true once it's done (finished, timed out, or failed to start).
@@ -1611,7 +2013,10 @@ function Get-LevelColor([string]$Level) {
 }
 
 function Get-HostLabel($Prof) {
-    if ($Prof['env'].Count -eq 0) { return 'Your claude.ai login' }
+    if (Test-PersonalProfile $Prof) {
+        if ([string]$Prof['env']['CLAUDE_CONFIG_DIR']) { return 'Your claude.ai login (separate account)' }
+        return 'Your claude.ai login'
+    }
     $u = [string]$Prof['env']['ANTHROPIC_BASE_URL']
     if (-not $u) { return 'Base URL not set' }
     try { ([uri]$u).Host } catch { $u }
@@ -1628,7 +2033,7 @@ function Set-CardState([string]$Id) {
     if (-not $p) { return }
     $st = $script:mainState[$Id]
     $dot = [string][char]0x25CF
-    $isGateway = $p['env'].Count -gt 0
+    $isGateway = -not (Test-PersonalProfile $p)
 
     # connection status
     if (-not $st -or $null -eq $st.Test) {
@@ -1668,12 +2073,14 @@ function Set-CardState([string]$Id) {
             $c.Login.Enabled = $false; $c.Login.Text = 'Refreshing...'
             $script:mainTip.SetToolTip($c.Login, 'Asking the Claude Code CLI to refresh the login token...')
         } else {
-            $c.Login.Text = 'Refresh login'
             $u = if ($st) { $st.Usage } else { $null }
+            $noLogin = ($u -and $u.Summary -eq 'No login found')
             $needsIt = ($u -and $u.Level -eq 'fail')
+            $c.Login.Text = if ($noLogin) { 'Log in...' } else { 'Refresh login' }
             $c.Login.Enabled = (-not $isGateway -and $needsIt)
             $script:mainTip.SetToolTip($c.Login, $(
-                    if (-not $isGateway -and $needsIt) { "Runs 'claude -p' in the background so Claude Code refreshes its saved token." }
+                    if ($noLogin) { "Opens a terminal already running 'claude' - type /login there and finish sign-in in your browser." }
+                    elseif (-not $isGateway -and $needsIt) { "Runs 'claude -p' in the background so Claude Code refreshes its saved token." }
                     elseif (-not $u) { 'Checking usage first...' }
                     else { 'Only needed when the login token has been rejected.' }))
         }
@@ -1693,6 +2100,7 @@ function Update-MainCards {
     $ap = if ($active) { Find-Profile $script:cfg $active } else { $null }
     $script:mainSub.Text = if ($ap) { "Active source: $($ap['name'])" } else { 'Active source: custom / unknown settings' }
 
+    $cardWidth = $WinWidth - 28
     $y = 8
     foreach ($p in $script:cfg['profiles']) {
         $id = [string]$p['id']
@@ -1700,7 +2108,7 @@ function Update-MainCards {
         $isActive = ($id -eq $active)
 
         $card = New-Object System.Windows.Forms.Panel
-        $card.Location = New-Object System.Drawing.Point(12, $y); $card.Size = New-Object System.Drawing.Size(452, $CardHeight)
+        $card.Location = New-Object System.Drawing.Point(12, $y); $card.Size = New-Object System.Drawing.Size($cardWidth, $CardHeight)
         $card.BackColor = [System.Drawing.Color]::White; $card.Anchor = 'Top,Left,Right'
 
         $bar = New-Object System.Windows.Forms.Panel
@@ -1713,7 +2121,7 @@ function Update-MainCards {
         $card.Controls.Add($name)
 
         $badge = New-Object System.Windows.Forms.Label
-        $badge.Text = 'ACTIVE'; $badge.AutoSize = $true; $badge.Location = '380,13'; $badge.Anchor = 'Top,Right'
+        $badge.Text = 'ACTIVE'; $badge.AutoSize = $true; $badge.Location = "$($cardWidth - 72),13"; $badge.Anchor = 'Top,Right'
         $badge.Font = New-Object System.Drawing.Font('Segoe UI', 7.5, [System.Drawing.FontStyle]::Bold)
         $badge.ForeColor = [System.Drawing.Color]::White; $badge.BackColor = $color; $badge.Padding = New-Object System.Windows.Forms.Padding(5, 2, 5, 2)
         $badge.Visible = $isActive
@@ -1725,12 +2133,12 @@ function Update-MainCards {
         $card.Controls.Add($host1)
 
         $status = New-Object System.Windows.Forms.Label
-        $status.Location = '20,54'; $status.Size = '420,20'; $status.AutoEllipsis = $true; $status.Anchor = 'Top,Left,Right'
+        $status.Location = '20,54'; $status.Size = "$($cardWidth - 32),20"; $status.AutoEllipsis = $true; $status.Anchor = 'Top,Left,Right'
         $status.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
         $card.Controls.Add($status)
 
         $usage = New-Object System.Windows.Forms.Label
-        $usage.Location = '20,74'; $usage.Size = '420,18'; $usage.AutoEllipsis = $true; $usage.Anchor = 'Top,Left,Right'
+        $usage.Location = '20,74'; $usage.Size = "$($cardWidth - 32),18"; $usage.AutoEllipsis = $true; $usage.Anchor = 'Top,Left,Right'
         $usage.Font = New-Object System.Drawing.Font('Segoe UI', 8.5)
         $card.Controls.Add($usage)
 
@@ -1740,7 +2148,7 @@ function Update-MainCards {
         $btnSwitch.Add_Click({ param($s, $e) Switch-To ([string]$s.Tag) })
         $card.Controls.Add($btnSwitch)
 
-        $isPersonal = ($p['env'].Count -eq 0)
+        $isPersonal = Test-PersonalProfile $p
 
         $btnFix = New-Object System.Windows.Forms.Button
         $btnFix.Text = 'Fix...'; $btnFix.Location = '152,96'; $btnFix.Size = '76,26'; $btnFix.Tag = $id
@@ -1770,14 +2178,14 @@ function Update-MainCards {
     }
     $panel.ResumeLayout()
 
-    # size the window to its cards (scrolls if the screen is too short)
-    $wa = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).WorkingArea
-    $want = 64 + $y + 8 + 78
-    $h = [Math]::Min($want, $wa.Height - 70)      # leave room for the title bar; the card list scrolls
-    $f.ClientSize = New-Object System.Drawing.Size(480, $h)
-    $script:mainHead.Size = New-Object System.Drawing.Size(480, 64)
-    $panel.Location = New-Object System.Drawing.Point(0, 64); $panel.Size = New-Object System.Drawing.Size(480, ($h - 64 - 78))
-    $script:mainFoot.Location = New-Object System.Drawing.Point(0, ($h - 78)); $script:mainFoot.Size = New-Object System.Drawing.Size(480, 78)
+    # size the window to fit every card - no scrolling or clipping
+    $y -= 10   # drop the trailing inter-card gap left after the last card
+    $want = 64 + $y + 6 + $FootHeight
+    $h = $want
+    $f.ClientSize = New-Object System.Drawing.Size($WinWidth, $h)
+    $script:mainHead.Size = New-Object System.Drawing.Size($WinWidth, 64)
+    $panel.Location = New-Object System.Drawing.Point(0, 64); $panel.Size = New-Object System.Drawing.Size($WinWidth, ($h - 64 - $FootHeight))
+    $script:mainFoot.Location = New-Object System.Drawing.Point(0, ($h - $FootHeight)); $script:mainFoot.Size = New-Object System.Drawing.Size($WinWidth, $FootHeight)
 
     foreach ($p in $script:cfg['profiles']) { Set-CardState ([string]$p['id']) }
 }
@@ -1788,8 +2196,20 @@ function Stop-MainRuns {
 }
 
 function Start-CardLoginRefresh([string]$Id) {
+    $p = Find-Profile $script:cfg $Id
+    $st = $script:mainState[$Id]
+    if ($st -and $st.Usage -and $st.Usage.Summary -eq 'No login found') {
+        $run = Start-Login ([string]$p['env']['CLAUDE_CONFIG_DIR'])
+        if ($run.Failed) {
+            [System.Windows.Forms.MessageBox]::Show($run.Error, 'Claude Switcher', 'OK', 'Warning') | Out-Null
+        } else {
+            Show-Balloon 'Log in' 'Opened a terminal - run /login there, then press Refresh on this window.'
+        }
+        return
+    }
+
     if ($script:loginRefresh) { return }     # one refresh at a time
-    $run = Start-LoginRefresh
+    $run = Start-LoginRefresh ([string]$p['env']['CLAUDE_CONFIG_DIR'])
     if ($run.Failed) {
         [System.Windows.Forms.MessageBox]::Show(
             "$($run.Error)`n`nOpen a terminal, run 'claude', and use /login - then press Refresh login again.",
@@ -1825,30 +2245,31 @@ function New-MainWindow {
     $f.StartPosition = 'Manual'; $f.ShowInTaskbar = $true; $f.KeyPreview = $true
     $f.BackColor = [System.Drawing.ColorTranslator]::FromHtml('#F0F0F0')
     $f.Font = New-Object System.Drawing.Font('Segoe UI', 9)
-    $f.ClientSize = New-Object System.Drawing.Size(480, 560)
+    $f.ClientSize = New-Object System.Drawing.Size($WinWidth, 588)
 
-    $head = New-Object System.Windows.Forms.Panel; $head.Location = '0,0'; $head.Size = '480,64'; $head.Anchor = 'Top,Left,Right'
+    $head = New-Object System.Windows.Forms.Panel; $head.Location = '0,0'; $head.Size = "$WinWidth,64"; $head.Anchor = 'Top,Left,Right'
     $title = New-Object System.Windows.Forms.Label
     $title.Text = 'Claude Switcher'; $title.Location = '16,8'; $title.AutoSize = $true
     $title.Font = New-Object System.Drawing.Font('Segoe UI', 15, [System.Drawing.FontStyle]::Bold)
     $sub = New-Object System.Windows.Forms.Label
     $sub.Location = '18,40'; $sub.AutoSize = $true; $sub.ForeColor = [System.Drawing.Color]::DimGray
     $refresh = New-Object System.Windows.Forms.Button
-    $refresh.Text = 'Refresh'; $refresh.Location = '378,18'; $refresh.Size = '86,28'; $refresh.Anchor = 'Top,Right'
+    $refresh.Text = 'Refresh'; $refresh.Location = "$($WinWidth - 102),18"; $refresh.Size = '86,28'; $refresh.Anchor = 'Top,Right'
     foreach ($c in $title, $sub, $refresh) { $head.Controls.Add($c) }
 
     $panel = New-Object System.Windows.Forms.Panel
-    $panel.Location = '0,64'; $panel.Size = '480,418'; $panel.AutoScroll = $true; $panel.Anchor = 'Top,Bottom,Left,Right'
+    $panel.Location = '0,64'; $panel.Size = ('{0},{1}' -f $WinWidth, (588 - 64 - $FootHeight)); $panel.AutoScroll = $false; $panel.Anchor = 'Top,Bottom,Left,Right'
 
-    $foot = New-Object System.Windows.Forms.Panel; $foot.Location = '0,482'; $foot.Size = '480,78'; $foot.Anchor = 'Bottom,Left,Right'
+    $foot = New-Object System.Windows.Forms.Panel; $foot.Location = ('0,{0}' -f (588 - $FootHeight)); $foot.Size = ('{0},{1}' -f $WinWidth, $FootHeight); $foot.Anchor = 'Bottom,Left,Right'
     $note = New-Object System.Windows.Forms.Label
     $note.Text = 'Restart running Claude Code sessions after switching.'
-    $note.Location = '16,8'; $note.Size = '448,18'; $note.AutoEllipsis = $true; $note.ForeColor = [System.Drawing.Color]::DimGray
-    $btnTest = New-Object System.Windows.Forms.Button; $btnTest.Text = 'Test connections...'; $btnTest.Location = '12,36'; $btnTest.Size = '120,30'
-    $btnUsage = New-Object System.Windows.Forms.Button; $btnUsage.Text = 'Check usage...'; $btnUsage.Location = '140,36'; $btnUsage.Size = '102,30'
-    $btnEdit = New-Object System.Windows.Forms.Button; $btnEdit.Text = 'Edit profiles...'; $btnEdit.Location = '250,36'; $btnEdit.Size = '104,30'
-    $btnFile = New-Object System.Windows.Forms.Button; $btnFile.Text = 'settings.json'; $btnFile.Location = '362,36'; $btnFile.Size = '102,30'
-    foreach ($c in $note, $btnTest, $btnUsage, $btnEdit, $btnFile) { $foot.Controls.Add($c) }
+    $note.Location = '16,8'; $note.Size = "$($WinWidth - 32),18"; $note.AutoEllipsis = $true; $note.ForeColor = [System.Drawing.Color]::DimGray
+    $btnTest = New-Object System.Windows.Forms.Button; $btnTest.Text = 'Test connections...'; $btnTest.Location = '12,34'; $btnTest.Size = '120,30'
+    $btnUsage = New-Object System.Windows.Forms.Button; $btnUsage.Text = 'Check usage...'; $btnUsage.Location = '140,34'; $btnUsage.Size = '102,30'
+    $btnUpd = New-Object System.Windows.Forms.Button; $btnUpd.Text = 'Check for updates...'; $btnUpd.Location = '250,34'; $btnUpd.Size = '130,30'
+    $btnEdit = New-Object System.Windows.Forms.Button; $btnEdit.Text = 'Edit profiles...'; $btnEdit.Location = '388,34'; $btnEdit.Size = '104,30'
+    $btnFile = New-Object System.Windows.Forms.Button; $btnFile.Text = 'settings.json'; $btnFile.Location = '500,34'; $btnFile.Size = '102,30'
+    foreach ($c in $note, $btnTest, $btnUsage, $btnUpd, $btnEdit, $btnFile) { $foot.Controls.Add($c) }
 
     $f.Controls.Add($panel); $f.Controls.Add($head); $f.Controls.Add($foot)
 
@@ -1860,6 +2281,7 @@ function New-MainWindow {
     $refresh.Add_Click({ Start-MainRefresh })
     $btnTest.Add_Click({ Show-TestWindow })
     $btnUsage.Add_Click({ Show-UsageWindow })
+    $btnUpd.Add_Click({ Show-ModelUpdateWindow })
     $btnEdit.Add_Click({ Show-Editor })
     $btnFile.Add_Click({ Start-Process notepad.exe -ArgumentList "`"$SettingsPath`"" })
 
