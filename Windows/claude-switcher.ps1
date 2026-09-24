@@ -412,6 +412,11 @@ function Stop-ProfileTest($T) { if ($T.Client) { $T.Client.Dispose() } }
 $UsageCachePath = Join-Path $ConfigDir 'usage-cache.json'
 $UsageReuseSec = 30       # Anthropic rate-limits the plan-usage call, so a very recent result is reused
 
+# IBM ICA's gateway exposes spend via the response header but not a budget via /key/info or /team/info.
+# The ICA admin portal (not reachable from here) showed 94/500 quota used at $140.81 spend on 2026-09-24,
+# implying a total budget of about $749 - rounds to $750. Used only to estimate a usage % from the dollar spend header.
+$IcaEstimatedBudget = 750
+
 function Get-ShortDetail($R) {
     if ($R.Kind -eq 'net') { return $R.Net }
     $d = [string]$R.Detail
@@ -572,8 +577,14 @@ function Complete-GatewayUsage1($U) {
         }
     } elseif ($null -ne $hdrSpend -and $hdrSpend -ne '') {
         $why = if ($key.Kind -eq 'http') { "this gateway does not expose /key/info (HTTP $($key.Code))" } else { '/key/info was unreachable' }
-        Add-UsageLine $U ("Key spend so far: {0}  (read from response headers; {1}, so no budget or limits are shown)" -f (Format-Money $hdrSpend), $why)
-        $U.Short.Add(("Key spend {0} (budget not exposed)" -f (Format-Money $hdrSpend)))
+        if ($U.Prof['id'] -eq 'ica' -and $IcaEstimatedBudget -gt 0) {
+            $pct = [double]$hdrSpend / $IcaEstimatedBudget * 100
+            Add-UsageLine $U ("Key spend so far: {0}  (read from response headers; {1}, so budget is not shown; estimated usage ~{2:N2}% of an assumed {3} quota)" -f (Format-Money $hdrSpend), $why, $pct, (Format-Money $IcaEstimatedBudget)) (Get-PctLevel $pct)
+            $U.Short.Add(("Key spend {0} (estimated usage at {1:N2}%, estimated budget {2})" -f (Format-Money $hdrSpend), $pct, (Format-Money $IcaEstimatedBudget)))
+        } else {
+            Add-UsageLine $U ("Key spend so far: {0}  (read from response headers; {1}, so no budget or limits are shown)" -f (Format-Money $hdrSpend), $why)
+            $U.Short.Add(("Key spend {0} (budget not exposed)" -f (Format-Money $hdrSpend)))
+        }
     } else {
         $U.Level = 'warn'
         Add-UsageLine $U "Could not read spend. Test message: $(Get-ShortDetail $msg)" 'warn'
@@ -755,6 +766,12 @@ public static class NativeIcon { [DllImport("user32.dll")] public static extern 
 # Must run before any control exists on this thread.
 [System.Windows.Forms.Application]::SetUnhandledExceptionMode([System.Windows.Forms.UnhandledExceptionMode]::CatchException)
 
+$script:appIcon = $null
+$appIconPath = Join-Path $PSScriptRoot 'claude-switcher.ico'
+if (Test-Path $appIconPath) {
+    try { $script:appIcon = New-Object System.Drawing.Icon($appIconPath) } catch { }
+}
+
 $createdNew = $false
 $mutex = New-Object System.Threading.Mutex($true, 'Local\ClaudeSwitcherTray', [ref]$createdNew)
 if (-not $createdNew) {
@@ -902,6 +919,7 @@ function Show-Editor([string]$SelectId = '') {
 
     $f = New-Object System.Windows.Forms.Form
     $f.Text = 'Claude Switcher - Profiles'
+    if ($script:appIcon) { $f.Icon = $script:appIcon }
     $f.StartPosition = 'CenterScreen'
     $f.ClientSize = New-Object System.Drawing.Size(640, 452)
     $f.MinimumSize = New-Object System.Drawing.Size(560, 412)
@@ -1073,6 +1091,7 @@ function Show-TestWindow {
 
     $f = New-Object System.Windows.Forms.Form
     $f.Text = 'Claude Switcher - Connection test'
+    if ($script:appIcon) { $f.Icon = $script:appIcon }
     $f.StartPosition = 'CenterScreen'
     $f.ClientSize = New-Object System.Drawing.Size(820, 420)
     $f.MinimumSize = New-Object System.Drawing.Size(600, 360)
@@ -1530,6 +1549,7 @@ function Show-Troubleshooter([string]$Id) {
     $script:tsProfileId = $Id; $script:tsApplied = $false; $script:tsFix = $null; $script:tsProbes = @(); $script:tsProf = $p
     $f = New-Object System.Windows.Forms.Form
     $f.Text = "Troubleshoot - $($p['name'])"
+    if ($script:appIcon) { $f.Icon = $script:appIcon }
     $f.StartPosition = 'CenterParent'; $f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false
     $f.ClientSize = New-Object System.Drawing.Size(720, 490)
     $f.Font = New-Object System.Drawing.Font('Segoe UI', 9)
@@ -1708,6 +1728,7 @@ function Show-UsageWindow {
 
     $f = New-Object System.Windows.Forms.Form
     $f.Text = 'Claude Switcher - Usage'
+    if ($script:appIcon) { $f.Icon = $script:appIcon }
     $f.StartPosition = 'CenterScreen'
     $f.ClientSize = New-Object System.Drawing.Size(820, 400)
     $f.MinimumSize = New-Object System.Drawing.Size(600, 340)
@@ -1812,6 +1833,7 @@ function Show-ModelUpdateWindow {
 
     $f = New-Object System.Windows.Forms.Form
     $f.Text = 'Claude Switcher - Check for model updates'
+    if ($script:appIcon) { $f.Icon = $script:appIcon }
     $f.StartPosition = 'CenterScreen'
     $f.ClientSize = New-Object System.Drawing.Size(820, 420)
     $f.MinimumSize = New-Object System.Drawing.Size(600, 340)
@@ -2241,6 +2263,7 @@ function Start-MainRefresh {
 function New-MainWindow {
     $f = New-Object System.Windows.Forms.Form
     $f.Text = 'Claude Switcher'
+    if ($script:appIcon) { $f.Icon = $script:appIcon }
     $f.FormBorderStyle = 'FixedSingle'; $f.MaximizeBox = $false
     $f.StartPosition = 'Manual'; $f.ShowInTaskbar = $true; $f.KeyPreview = $true
     $f.BackColor = [System.Drawing.ColorTranslator]::FromHtml('#F0F0F0')
