@@ -413,9 +413,37 @@ $UsageCachePath = Join-Path $ConfigDir 'usage-cache.json'
 $UsageReuseSec = 30       # Anthropic rate-limits the plan-usage call, so a very recent result is reused
 
 # IBM ICA's gateway exposes spend via the response header but not a budget via /key/info or /team/info.
-# The ICA admin portal (not reachable from here) showed 94/500 quota used at $140.81 spend on 2026-09-24,
-# implying a total budget of about $749 - rounds to $750. Used only to estimate a usage % from the dollar spend header.
-$IcaEstimatedBudget = 750
+# That header is lifetime key spend, while the ICA admin portal (not reachable from here) counts "Advantage Credits"
+# against a weekly quota of 500 that resets every Monday 08:00 SGT. Calibration from the portal:
+#   2026-09-24: 94 credits at $140.81 lifetime spend -> about $1.50 per credit
+#   2026-09-29: 46 credits (9%) at $231.92 lifetime spend -> the week from Mon 28 Sep started at about $163.01
+# Later weeks start from the last spend seen before their reset (kept in the usage cache), so they may slightly
+# overcount if the key was used between that last check and the reset.
+$IcaWeeklyCredits = 500
+$IcaUsdPerCredit = 140.81 / 94
+$IcaSeedWeek = '2026-09-28'
+$IcaSeedWeekStartSpend = 231.92 - 46 * $IcaUsdPerCredit
+
+# Start of the current ICA credit week (Monday 08:00 SGT, UTC+8 with no DST) as a DateTimeOffset.
+function Get-IcaWeekStart {
+    $sg = [DateTimeOffset]::UtcNow.ToOffset([TimeSpan]::FromHours(8))
+    $start = (New-Object DateTimeOffset -ArgumentList $sg.Date, $sg.Offset).AddHours(8).AddDays(-((([int]$sg.DayOfWeek) + 6) % 7))
+    if ($start -gt $sg) { $start = $start.AddDays(-7) }
+    $start
+}
+
+# Spend at the start of the current ICA week, remembering the last spend seen so the next week has a baseline.
+function Get-IcaWeekStartSpend([double]$Spend, [string]$Week) {
+    $c = $null; $st = $null
+    try { $c = Read-JsonFile $UsageCachePath; if ($c.Contains('ica-week')) { $st = $c['ica-week'] } } catch { }
+    $base = if ($Week -eq $IcaSeedWeek) { $IcaSeedWeekStartSpend }
+            elseif ($st -and [string]$st['week'] -eq $Week) { [double]$st['base'] }
+            elseif ($st -and $null -ne $st['last']) { [double]$st['last'] }
+            else { $Spend }
+    if ($base -gt $Spend) { $base = $Spend }
+    if ($c) { try { $c['ica-week'] = [ordered]@{ week = $Week; base = $base; last = $Spend }; Write-JsonFile $UsageCachePath $c } catch { } }
+    $base
+}
 
 function Get-ShortDetail($R) {
     if ($R.Kind -eq 'net') { return $R.Net }
@@ -577,10 +605,17 @@ function Complete-GatewayUsage1($U) {
         }
     } elseif ($null -ne $hdrSpend -and $hdrSpend -ne '') {
         $why = if ($key.Kind -eq 'http') { "this gateway does not expose /key/info (HTTP $($key.Code))" } else { '/key/info was unreachable' }
-        if ($U.Prof['id'] -eq 'ica' -and $IcaEstimatedBudget -gt 0) {
-            $pct = [double]$hdrSpend / $IcaEstimatedBudget * 100
-            Add-UsageLine $U ("Key spend so far: {0}  (read from response headers; {1}, so budget is not shown; estimated usage ~{2:N2}% of an assumed {3} quota)" -f (Format-Money $hdrSpend), $why, $pct, (Format-Money $IcaEstimatedBudget)) (Get-PctLevel $pct)
-            $U.Short.Add(("Key spend {0} (estimated usage at {1:N2}%, estimated budget {2})" -f (Format-Money $hdrSpend), $pct, (Format-Money $IcaEstimatedBudget)))
+        if ($U.Prof['id'] -eq 'ica' -and $IcaWeeklyCredits -gt 0) {
+            $start = Get-IcaWeekStart
+            $reset = $start.AddDays(7)
+            $base = Get-IcaWeekStartSpend ([double]$hdrSpend) $start.ToString('yyyy-MM-dd')
+            $credits = ([double]$hdrSpend - $base) / $IcaUsdPerCredit
+            $pct = $credits / $IcaWeeklyCredits * 100
+            $rt = Format-ResetTime $reset.UtcDateTime
+            Add-UsageLine $U ("Advantage Credits this week: ~{0:N0} of {1} ({2:N0}%) - estimated{3}" -f $credits, $IcaWeeklyCredits, $pct, $(if ($rt) { ", $rt" } else { '' })) (Get-PctLevel $pct)
+            Add-UsageLine $U ("Key spend: {0} lifetime, {1} since the Monday 08:00 SGT reset (read from response headers; {2}; credits estimated at ~{3} each)" -f (Format-Money $hdrSpend), (Format-Money ([double]$hdrSpend - $base)), $why, (Format-Money $IcaUsdPerCredit))
+            $rs = Format-ResetShort $reset.UtcDateTime
+            $U.Short.Add(("Credits ~{0:N0} of {1} ({2:N0}%){3}" -f $credits, $IcaWeeklyCredits, $pct, $(if ($rs) { " - resets $rs" } else { '' })))
         } else {
             Add-UsageLine $U ("Key spend so far: {0}  (read from response headers; {1}, so no budget or limits are shown)" -f (Format-Money $hdrSpend), $why)
             $U.Short.Add(("Key spend {0} (budget not exposed)" -f (Format-Money $hdrSpend)))
