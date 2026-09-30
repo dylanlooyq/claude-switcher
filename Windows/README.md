@@ -33,7 +33,8 @@ and the window opens.
    Use `ANTHROPIC_API_KEY` instead if your gateway wants the `x-api-key` header. Set **Model** if it needs one.
 3. Click **Save**, then **Switch to this**.
 4. **Restart any running Claude Code sessions or terminals** - settings.json is only read at startup, and
-   existing terminals keep the environment variables they started with.
+   existing terminals keep the environment variables they started with. Editors such as VS Code are the
+   same: see **Stale editors** below.
 
 The starter profiles are `personal`, `personal (2nd account)`, `ica` and `rise`; rename them however you like.
 
@@ -106,6 +107,12 @@ login and settings under `%APPDATA%\claude-switcher\accounts\<profile>\` instead
 
 ## Good to know
 
+- **Stale editors.** Windows gives each app a copy of the environment variables when it starts, and a switch
+  can't change that copy. So VS Code, started while a gateway was active, keeps that gateway's `ANTHROPIC_*`
+  values, and Claude Code inside it keeps using them (and showing that gateway's models) even after you switch
+  back to Personal. settings.json can override a variable but not remove one. The window shows a yellow banner
+  when it spots this in VS Code, VS Code Insiders, Cursor or Windsurf, and `-List` / `-Use` print the same
+  warning. The fix is to quit the editor fully (**File > Exit**; Reload Window is not enough) and start it again.
 - **Overrides.** A project-level `.claude/settings.json`, or a **Machine**-level (system-wide) `ANTHROPIC_*`
   variable, override what the switcher writes. If a switch does not seem to take effect, check those first.
 - **Personal usage** uses the same undocumented Anthropic endpoint that Claude Code's `/usage` reads, with your

@@ -150,18 +150,21 @@ function Get-CurrentManagedEnv($Cfg) {
 
 # Work out the active profile from settings.json (plus the real CLAUDE_CONFIG_DIR env var), so
 # manual edits can't leave it stale.
-function Get-ActiveId($Cfg) {
-    $senv = Get-CurrentManagedEnv $Cfg
+function Get-ActiveId($Cfg) { Get-ProfileIdForEnv $Cfg (Get-CurrentManagedEnv $Cfg) }
+
+# The profile whose env values all appear in $Senv, the plain (no-env) profile when $Senv has no
+# managed keys set at all, or $null for a mix that matches nothing.
+function Get-ProfileIdForEnv($Cfg, $Senv) {
     $plain = $null
     foreach ($p in $Cfg['profiles']) {
         $vals = @($p['env'].Keys | Where-Object { [string]$p['env'][$_] -ne '' })
         if ($vals.Count -eq 0) { if ($null -eq $plain) { $plain = $p['id'] }; continue }
         $match = $true
-        foreach ($k in $vals) { if ([string]$senv[$k] -ne [string]$p['env'][$k]) { $match = $false; break } }
+        foreach ($k in $vals) { if ([string]$Senv[$k] -ne [string]$p['env'][$k]) { $match = $false; break } }
         if ($match) { return $p['id'] }
     }
     $hasManaged = $false
-    foreach ($k in (Get-ManagedKeys $Cfg)) { if ($senv.Contains($k) -and [string]$senv[$k] -ne '') { $hasManaged = $true } }
+    foreach ($k in (Get-ManagedKeys $Cfg)) { if ([string]$Senv[$k] -ne '') { $hasManaged = $true } }
     if (-not $hasManaged) { return $plain }
     $null
 }
@@ -207,6 +210,114 @@ function Set-ManagedUserEnv($Cfg, $Prof) {
             [Environment]::SetEnvironmentVariable($k, $null, 'User')
         }
     }
+    Sync-ProcessManagedEnv $Cfg
+}
+
+# Brings this process's own copy of the managed keys in line with what a freshly started program
+# would get (User, else Machine), so anything we launch - e.g. `claude -p` for a login refresh - uses
+# the active source rather than whatever was set when the tray app started.
+function Sync-ProcessManagedEnv($Cfg) {
+    foreach ($k in (Get-ManagedKeys $Cfg)) {
+        $val = [Environment]::GetEnvironmentVariable($k, 'User')
+        if (-not $val) { $val = [Environment]::GetEnvironmentVariable($k, 'Machine') }
+        [Environment]::SetEnvironmentVariable($k, $(if ($val) { $val } else { $null }), 'Process')
+    }
+}
+
+# ---------- stale app environments ----------
+# Windows gives each program a copy of the environment when it starts, and nothing can change that
+# copy afterwards. An editor started while a gateway was active keeps that gateway's ANTHROPIC_* values
+# for as long as it runs, and so does every Claude Code session it starts - settings.json can override
+# a variable but not remove one, so switching back to Personal silently does nothing in there.
+
+# Process name -> label, for the long-running apps that host Claude Code sessions.
+$StaleEnvApps = [ordered]@{ 'Code' = 'VS Code'; 'Code - Insiders' = 'VS Code Insiders'; 'Cursor' = 'Cursor'; 'Windsurf' = 'Windsurf' }
+
+# Another process's environment, read from its PEB, as a (case-insensitive) hashtable; $null if we
+# can't read it (elevated, protected, or this isn't a 64-bit PowerShell).
+function Read-ProcessEnv([int]$ProcessId) {
+    if (-not ('ProcEnvReader' -as [type])) {
+        Add-Type @"
+using System; using System.Runtime.InteropServices; using System.Text;
+public static class ProcEnvReader {
+    [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr h, int cls, byte[] info, int len, out int ret);
+    [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(int access, bool inherit, int pid);
+    [DllImport("kernel32.dll")] static extern bool ReadProcessMemory(IntPtr h, IntPtr addr, byte[] buf, IntPtr size, out IntPtr read);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    static byte[] Read(IntPtr h, long addr, int size) {
+        var b = new byte[size]; IntPtr n;
+        return (ReadProcessMemory(h, new IntPtr(addr), b, new IntPtr(size), out n) && (long)n == size) ? b : null;
+    }
+    // x64 layout: PEB+0x20 -> RTL_USER_PROCESS_PARAMETERS; +0x80 Environment, +0x3F0 EnvironmentSize.
+    public static string Get(int pid) {
+        if (IntPtr.Size != 8) return null;
+        IntPtr h = OpenProcess(0x1000 | 0x0010, false, pid);   // QUERY_LIMITED_INFORMATION | VM_READ
+        if (h == IntPtr.Zero) return null;
+        try {
+            var pbi = new byte[48]; int ret;
+            if (NtQueryInformationProcess(h, 0, pbi, pbi.Length, out ret) != 0) return null;
+            var pp = Read(h, BitConverter.ToInt64(pbi, 8) + 0x20, 8); if (pp == null) return null;
+            long pars = BitConverter.ToInt64(pp, 0);
+            var ev = Read(h, pars + 0x80, 8); var es = Read(h, pars + 0x3F0, 8);
+            if (ev == null || es == null) return null;
+            long env = BitConverter.ToInt64(ev, 0), size = BitConverter.ToInt64(es, 0);
+            if (env == 0 || size <= 0 || size > (1 << 22)) return null;
+            var buf = Read(h, env, (int)size);
+            return buf == null ? null : Encoding.Unicode.GetString(buf);
+        } finally { CloseHandle(h); }
+    }
+}
+"@
+    }
+    $raw = $null
+    try { $raw = [ProcEnvReader]::Get($ProcessId) } catch { }
+    if (-not $raw) { return $null }
+    $h = @{}
+    foreach ($line in ($raw -split "`0")) {
+        $i = $line.IndexOf('=')
+        if ($i -gt 0) { $h[$line.Substring(0, $i)] = $line.Substring($i + 1) }   # skips the "=C:=C:\" entries
+    }
+    $h
+}
+
+# Running apps whose inherited environment disagrees with the active profile in a way Claude Code inside
+# them can't recover from: a gateway key the active profile doesn't set (settings.json can't unset it),
+# or a different CLAUDE_CONFIG_DIR (never in settings.json at all). One entry per app, with the name of
+# the source its leftovers match, if any.
+function Get-StaleApps($Cfg) {
+    $active = Get-ActiveId $Cfg
+    $ap = if ($active) { Find-Profile $Cfg $active } else { $null }
+    if (-not $ap) { return , @() }
+    $keys = Get-ManagedKeys $Cfg
+    $found = @()
+    foreach ($name in $StaleEnvApps.Keys) {
+        foreach ($proc in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
+            $penv = Read-ProcessEnv $proc.Id
+            if ($null -eq $penv) { continue }
+            $bad = @(foreach ($k in $keys) {
+                    $have = [string]$penv[$k]; $want = [string]$ap['env'][$k]
+                    if ($k -eq 'CLAUDE_CONFIG_DIR') { if ($have.TrimEnd('\') -ne $want.TrimEnd('\')) { $k } }
+                    elseif ($have -and -not $want) { $k }
+                })
+            if ($bad.Count -eq 0) { continue }
+            $srcId = Get-ProfileIdForEnv $Cfg $penv
+            $src = if ($srcId -and $srcId -ne $active) { [string](Find-Profile $Cfg $srcId)['name'] } else { $null }
+            $found += , @{ Label = $StaleEnvApps[$name]; Keys = $bad; Source = $src }
+            break
+        }
+    }
+    , $found
+}
+
+# One sentence for the window/balloon/CLI, or '' when nothing is stale.
+function Get-StaleAppsText($Stale) {
+    if ($Stale.Count -eq 0) { return '' }
+    $names = @($Stale | ForEach-Object { $_.Label })
+    $who = if ($names.Count -eq 1) { $names[0] } else { ($names[0..($names.Count - 2)] -join ', ') + ' and ' + $names[-1] }
+    $srcs = @($Stale | ForEach-Object { $_.Source } | Where-Object { $_ } | Select-Object -Unique)
+    $src = if ($srcs.Count -eq 1) { $srcs[0] } else { 'an earlier source' }
+    if ($names.Count -eq 1) { "$who is still using $src - it keeps the settings it started with. Quit it fully (File > Exit) and start it again." }
+    else { "$who are still using $src - they keep the settings they started with. Quit each fully (File > Exit) and start it again." }
 }
 
 # ---------- connection tester ----------
@@ -735,6 +846,8 @@ if ($List -or $Use) {
         $state = if (Test-Configured $p) { '' } else { '  (not configured)' }
         Write-Host ("{0} {1,-10} {2}{3}" -f $mark, $p['id'], $p['name'], $state)
     }
+    $staleText = Get-StaleAppsText (Get-StaleApps $cfg)
+    if ($staleText) { Write-Host "`n$staleText" -ForegroundColor Yellow }
     if (-not $Test) { return }
 }
 
@@ -846,6 +959,8 @@ function New-DotIcon([string]$Hex, [string]$Letter) {
 }
 
 $script:cfg = Get-Config
+Sync-ProcessManagedEnv $script:cfg
+$script:staleApps = @()
 $script:notify = New-Object System.Windows.Forms.NotifyIcon
 $script:menu = New-Object System.Windows.Forms.ContextMenuStrip
 $script:notify.ContextMenuStrip = $script:menu
@@ -905,6 +1020,7 @@ function Update-Tray {
         })
 
     # Keep the window (if open) in step with config changes and switches.
+    $script:staleApps = Get-StaleApps $script:cfg
     if (Get-Command Update-MainCards -ErrorAction SilentlyContinue) { Update-MainCards }
 }
 
@@ -918,7 +1034,9 @@ function Switch-To([string]$Id) {
     try {
         Set-ActiveProfile $script:cfg $Id
         Update-Tray
-        Show-Balloon "Switched to $($p['name'])" 'Restart running Claude Code sessions for it to take effect.'
+        $staleText = Get-StaleAppsText $script:staleApps
+        if ($staleText) { Show-Balloon "Switched to $($p['name'])" $staleText 'Warning' }
+        else { Show-Balloon "Switched to $($p['name'])" 'Restart running Claude Code sessions for it to take effect.' }
         Set-MainNote "Switched to $($p['name']). Restart running Claude Code sessions for it to take effect."
     } catch {
         Show-Balloon 'Switch failed' $_.Exception.Message 'Error'
@@ -2000,6 +2118,7 @@ $script:mainLastRefresh = [datetime]::MinValue
 $MainAutoRefreshSec = 120
 $CardHeight = 128
 $FootHeight = 76
+$WarnHeight = 52    # the stale-app banner under the header, when shown
 $WinWidth = 614
 $script:loginRefresh = $null   # @{ Id; Proc; Sw } while a "Refresh login" run is in flight, one at a time
 
@@ -2157,6 +2276,15 @@ function Update-MainCards {
     $ap = if ($active) { Find-Profile $script:cfg $active } else { $null }
     $script:mainSub.Text = if ($ap) { "Active source: $($ap['name'])" } else { 'Active source: custom / unknown settings' }
 
+    $staleText = Get-StaleAppsText $script:staleApps
+    $warnH = if ($staleText) { $WarnHeight } else { 0 }
+    $script:mainWarn.Visible = [bool]$staleText
+    $script:mainWarnText.Text = $staleText
+    $script:mainTip.SetToolTip($script:mainWarnText, $(if ($staleText) {
+                (@($script:staleApps | ForEach-Object { "$($_.Label) still has: $($_.Keys -join ', ')" }) -join "`n") +
+                "`n`nWindows gives each app a copy of the environment variables when it starts, and a switch can't change that copy.`nReload Window isn't enough - every window has to close. Press Refresh here afterwards to re-check."
+            } else { '' }))
+
     $cardWidth = $WinWidth - 28
     $y = 8
     foreach ($p in $script:cfg['profiles']) {
@@ -2237,11 +2365,12 @@ function Update-MainCards {
 
     # size the window to fit every card - no scrolling or clipping
     $y -= 10   # drop the trailing inter-card gap left after the last card
-    $want = 64 + $y + 6 + $FootHeight
+    $want = 64 + $warnH + $y + 6 + $FootHeight
     $h = $want
     $f.ClientSize = New-Object System.Drawing.Size($WinWidth, $h)
     $script:mainHead.Size = New-Object System.Drawing.Size($WinWidth, 64)
-    $panel.Location = New-Object System.Drawing.Point(0, 64); $panel.Size = New-Object System.Drawing.Size($WinWidth, ($h - 64 - $FootHeight))
+    $script:mainWarn.Location = New-Object System.Drawing.Point(12, 64); $script:mainWarn.Size = New-Object System.Drawing.Size(($WinWidth - 24), ($WarnHeight - 8))
+    $panel.Location = New-Object System.Drawing.Point(0, (64 + $warnH)); $panel.Size = New-Object System.Drawing.Size($WinWidth, ($h - 64 - $warnH - $FootHeight))
     $script:mainFoot.Location = New-Object System.Drawing.Point(0, ($h - $FootHeight)); $script:mainFoot.Size = New-Object System.Drawing.Size($WinWidth, $FootHeight)
 
     foreach ($p in $script:cfg['profiles']) { Set-CardState ([string]$p['id']) }
@@ -2282,6 +2411,10 @@ function Start-MainRefresh {
     if (-not $script:mainForm -or $script:mainForm.IsDisposed) { return }
     $script:mainTimer.Stop()
     Stop-MainRuns
+    # re-check for stale editors too (e.g. after quitting and reopening VS Code); resizes the window if that changed
+    $was = Get-StaleAppsText $script:staleApps
+    $script:staleApps = Get-StaleApps $script:cfg
+    if ((Get-StaleAppsText $script:staleApps) -ne $was) { Update-MainCards }
     $runs = @()
     foreach ($p in $script:cfg['profiles']) {
         $id = [string]$p['id']
@@ -2329,9 +2462,18 @@ function New-MainWindow {
     $btnFile = New-Object System.Windows.Forms.Button; $btnFile.Text = 'settings.json'; $btnFile.Location = '500,34'; $btnFile.Size = '102,30'
     foreach ($c in $note, $btnTest, $btnUsage, $btnUpd, $btnEdit, $btnFile) { $foot.Controls.Add($c) }
 
-    $f.Controls.Add($panel); $f.Controls.Add($head); $f.Controls.Add($foot)
+    # Shown by Update-MainCards when an editor is still running on an earlier source (Get-StaleApps).
+    $warn = New-Object System.Windows.Forms.Panel; $warn.Visible = $false
+    $warn.BackColor = [System.Drawing.ColorTranslator]::FromHtml('#FFF4CE')
+    $warnText = New-Object System.Windows.Forms.Label
+    $warnText.Dock = 'Fill'; $warnText.Padding = New-Object System.Windows.Forms.Padding(10, 4, 10, 4); $warnText.TextAlign = 'MiddleLeft'
+    $warnText.ForeColor = [System.Drawing.ColorTranslator]::FromHtml('#5C3B00')
+    $warn.Controls.Add($warnText)
+
+    $f.Controls.Add($panel); $f.Controls.Add($warn); $f.Controls.Add($head); $f.Controls.Add($foot)
 
     $script:mainForm = $f; $script:mainPanel = $panel; $script:mainHead = $head; $script:mainFoot = $foot
+    $script:mainWarn = $warn; $script:mainWarnText = $warnText
     $script:mainSub = $sub; $script:mainNote = $note; $script:mainRefresh = $refresh
     $script:mainTip = New-Object System.Windows.Forms.ToolTip
     $script:mainTip.AutoPopDelay = 20000
@@ -2394,6 +2536,7 @@ function New-MainWindow {
 function Show-MainWindow {
     if (-not $script:mainForm -or $script:mainForm.IsDisposed) { New-MainWindow }
     $f = $script:mainForm
+    $script:staleApps = Get-StaleApps $script:cfg
     Update-MainCards
     if (-not $f.Visible) {
         # open in the corner nearest the tray, on the screen the mouse is on
